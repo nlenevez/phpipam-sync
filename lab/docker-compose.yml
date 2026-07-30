@@ -1,0 +1,136 @@
+# Throwaway lab: two fully independent phpIPAM instances, for verifying
+# phpipam-sync against real software rather than against a fake.
+#
+# "Independent" is the whole point. Each instance has its own database
+# with its own auto-increment counters, and setup.sh deliberately pushes
+# instance 2's counters forward, so the same logical subnet is guaranteed
+# to have a different id on each side. Anything that accidentally relies
+# on an id therefore fails visibly instead of appearing to work.
+#
+# The nginx sidecars exist because phpIPAM refuses app-code API auth over
+# plain HTTP ("SSL connection is required for API"). They terminate TLS
+# with a self-signed cert and set X-Forwarded-Proto, which phpIPAM trusts
+# because of IPAM_TRUST_X_FORWARDED. That also makes the lab exercise the
+# verify_ssl: false path in the tool's config.
+#
+# Everything here is disposable: no volumes are declared, so
+# `docker compose down` destroys all state.
+#
+# The phpIPAM version is pinned but overridable, because the two bugs
+# this lab found were both version-specific API behaviours -- so being
+# able to re-verify against whatever version you actually run matters
+# more than testing one blessed version:
+#
+#     PHPIPAM_VERSION=v1.7.4 ./setup.sh
+
+services:
+  db1:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: phpipam
+      MARIADB_USER: phpipam
+      MARIADB_PASSWORD: phpipampw
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ipam1:
+    image: phpipam/phpipam-www:${PHPIPAM_VERSION:-v1.8.1}
+    depends_on:
+      db1:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+      IPAM_TRUST_X_FORWARDED: "true"
+      IPAM_DATABASE_HOST: db1
+      IPAM_DATABASE_NAME: phpipam
+      IPAM_DATABASE_USER: phpipam
+      IPAM_DATABASE_PASS: phpipampw
+      IPAM_DATABASE_WEBHOST: "%"
+
+  tls1:
+    image: nginx:alpine
+    depends_on: [ipam1]
+    ports:
+      - "127.0.0.1:8443:443"
+    volumes:
+      - ./certs:/certs:ro
+      - ./nginx/ipam1.conf:/etc/nginx/conf.d/default.conf:ro
+
+  db2:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: phpipam
+      MARIADB_USER: phpipam
+      MARIADB_PASSWORD: phpipampw
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ipam2:
+    image: phpipam/phpipam-www:${PHPIPAM_VERSION:-v1.8.1}
+    depends_on:
+      db2:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+      IPAM_TRUST_X_FORWARDED: "true"
+      IPAM_DATABASE_HOST: db2
+      IPAM_DATABASE_NAME: phpipam
+      IPAM_DATABASE_USER: phpipam
+      IPAM_DATABASE_PASS: phpipampw
+      IPAM_DATABASE_WEBHOST: "%"
+
+  tls2:
+    image: nginx:alpine
+    depends_on: [ipam2]
+    ports:
+      - "127.0.0.1:8444:443"
+    volumes:
+      - ./certs:/certs:ro
+      - ./nginx/ipam2.conf:/etc/nginx/conf.d/default.conf:ro
+
+  # -- Instance 3: the MASTER, for the fan-in topology ------------------
+  # Used only by verify-fanin.sh, which treats instances 1 and 2 as two
+  # airgapped subordinates pushing up into this one.
+  db3:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: phpipam
+      MARIADB_USER: phpipam
+      MARIADB_PASSWORD: phpipampw
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ipam3:
+    image: phpipam/phpipam-www:${PHPIPAM_VERSION:-v1.8.1}
+    depends_on:
+      db3:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+      IPAM_TRUST_X_FORWARDED: "true"
+      IPAM_DATABASE_HOST: db3
+      IPAM_DATABASE_NAME: phpipam
+      IPAM_DATABASE_USER: phpipam
+      IPAM_DATABASE_PASS: phpipampw
+      IPAM_DATABASE_WEBHOST: "%"
+
+  tls3:
+    image: nginx:alpine
+    depends_on: [ipam3]
+    ports:
+      - "127.0.0.1:8445:443"
+    volumes:
+      - ./certs:/certs:ro
+      - ./nginx/ipam3.conf:/etc/nginx/conf.d/default.conf:ro

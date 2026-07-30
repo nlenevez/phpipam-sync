@@ -1,0 +1,84 @@
+# phpipam-sync configuration.
+#
+# Copy to config.yml and fill in. config.yml is gitignored -- but note
+# that nothing secret belongs in it anyway: app tokens are always
+# resolved from the environment or an external command, never read from
+# this file.
+#
+# The SAME config file works on both instances. The exporter only reads
+# the `source:` block; the importer only reads `target:`. So the copy on
+# Instance 1 needs only the source token, and the copy on Instance 2 only
+# the target token -- neither host ever holds both.
+
+# -- Instance 1: the source of truth. Read-only; never written to. -----
+source:
+  base_url: https://ipam1.example.com     # no trailing slash, no /api/
+  app_id: sync                            # phpIPAM Administration > API app id
+  token_env: PHPIPAM_SRC_TOKEN            # env var holding that app's token
+  verify_ssl: true
+  timeout: 30
+
+# -- Instance 2: the replica. Written to, additively. ------------------
+target:
+  base_url: https://ipam2.example.com
+  app_id: sync
+  # Either token_env (as above) or token_command -- stdout is the token.
+  # token_command lets any secret store work without this repo depending
+  # on one:
+  #   token_command: "ansible-vault view /etc/ipam-sync/target_token"
+  #   token_command: "pass show ipam/instance2-api"
+  token_env: PHPIPAM_DST_TOKEN
+  verify_ssl: true
+  timeout: 30
+
+# -- What to replicate -------------------------------------------------
+# Whole sections, by name. Every subnet in these sections on Instance 1
+# (including nested subnets) and every address inside them is replicated.
+sections:
+  - Shared
+
+# Optional: if the two instances cannot agree on a section name, map
+# source name -> target name. Omit entirely if the names match.
+# section_map:
+#   Shared: Shared-from-instance-1
+
+options:
+  # phpIPAM tags (on both subnets and addresses) are ids into its
+  # `ipTags` table. Ids 1-4 are the stock Offline/Used/Reserved/DHCP tags
+  # and are identical on any default install, so replicating them is
+  # safe. Set false if EITHER instance has custom tags -- otherwise a tag
+  # could land pointing at the wrong label on the target.
+  sync_tags: true
+
+  # Create a section on the target if the snapshot names one that does
+  # not exist there. Off by default: a section created this way has no
+  # permissions set, so it is invisible to every non-admin user, which
+  # looks exactly like the sync having silently failed. Create the
+  # section by hand on Instance 2 instead, with the permissions you want.
+  create_missing_sections: false
+
+  # Delete records on Instance 2 that Instance 1 no longer has, making
+  # the replica a strict mirror rather than additive-only.
+  #
+  # Off by default. With it off, the worst a bad snapshot can do is add
+  # or update; with it on, a bad snapshot can destroy. Turn it on when
+  # you want the replica to track deletions -- otherwise Instance 2
+  # slowly accumulates addresses that were freed upstream and starts
+  # over-reporting utilisation.
+  #
+  # Can also be set per run with --delete / --no-delete, which override
+  # whatever is set here.
+  delete_drift: false
+
+  # Safety limit for the above: refuse the whole run if it would delete
+  # more than this fraction of the in-scope records on the target.
+  #
+  # This is for the failure that actually matters -- not one record
+  # wrongly deleted, but an empty or mis-scoped snapshot arriving over a
+  # link the replica cannot question, taking the whole replica with it.
+  # A run that wants to delete most of your IPAM should stop and ask.
+  #
+  # A floor of 5 records always applies, so a small dataset is not
+  # permanently blocked by a percentage that rounds to nothing.
+  # --force-delete bypasses this for a single run.
+  delete_limit_fraction: 0.1

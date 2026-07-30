@@ -1,0 +1,85 @@
+# phpipam-sync -- MASTER configuration (fan-in).
+#
+# For the topology where several airgapped phpIPAM installations each
+# manage their own networks and push up into one read-only master:
+#
+#   site-a  ──(site-a-ipam.git, mirrored)──┐
+#   site-b  ──(site-b-ipam.git, mirrored)──┤
+#   site-c  ──(site-c-ipam.git, mirrored)──┼──▶  MASTER phpIPAM
+#   site-d  ──(site-d-ipam.git, mirrored)──┤     (read-only to users)
+#   site-e  ──(site-e-ipam.git, mirrored)──┘
+#
+# Each subordinate runs ipam_export.py with its own single-source config
+# (config.example.yml) and pushes to its own repo. The master mirrors all
+# of those repos locally and runs ipam_import.py ONCE with this file:
+#
+#     ./ipam_import.py --config config.master.yml --pull            # dry run
+#     ./ipam_import.py --config config.master.yml --pull --apply    # for real
+#     ./ipam_import.py --config config.master.yml --source site-c   # just one
+#
+# A failure on one subordinate (broken mirror, corrupt snapshot) is
+# reported and skipped -- the other sites still sync. Exit 1 if any
+# source could not be processed, 2 if individual records failed.
+
+# -- The master instance. The only phpIPAM written to. -----------------
+target:
+  base_url: https://ipam-master.example.com
+  app_id: sync
+  token_env: PHPIPAM_MASTER_TOKEN
+  verify_ssl: true
+  timeout: 30
+
+# -- The subordinates ---------------------------------------------------
+#
+# EACH SUBORDINATE MUST OWN ITS OWN SECTION ON THE MASTER. This is not a
+# style preference. Every import treats anything in its target section
+# that is absent from its snapshot as an orphan -- reported as drift, and
+# deleted outright once options.delete_drift is on. Two subordinates
+# sharing a section means each run sees the other's subnets as orphans,
+# so site A's sync would wipe site B's networks off the master.
+#
+# The loader refuses to start if two sources target the same section, so
+# this cannot be got wrong silently -- but it is worth understanding why.
+#
+#   name:         label for logs and --source
+#   snapshot_dir: local working copy of that subordinate's mirrored repo
+#   sections:     section name(s) AS EXPORTED by that subordinate
+#   section_map:  where they land on this master -- one section per site
+sources:
+  - name: site-a
+    snapshot_dir: /srv/ipam/site-a-ipam
+    sections: [Networks]
+    section_map: {Networks: Site-A}
+
+  - name: site-b
+    snapshot_dir: /srv/ipam/site-b-ipam
+    sections: [Networks]
+    section_map: {Networks: Site-B}
+
+  - name: site-c
+    snapshot_dir: /srv/ipam/site-c-ipam
+    sections: [Networks]
+    section_map: {Networks: Site-C}
+
+  # ... one block per subordinate.
+
+options:
+  # See config.example.yml for the full notes on each of these.
+  sync_tags: true
+
+  # Leave false. The master's sections should be created by hand with the
+  # read-only permissions you want -- a section created automatically has
+  # no permissions and is invisible to non-admins.
+  create_missing_sections: false
+
+  # Start false. Run additive for a few weeks first and watch the drift
+  # report: on a master, drift for site A that mentions site B's networks
+  # means the sectioning is wrong, and you want to find that out while
+  # deletion is still off.
+  #
+  # Once proven, setting this true makes the master an exact mirror --
+  # which also enforces "users never enter data into the master", since
+  # anything created by hand is removed on the next sync.
+  delete_drift: false
+
+  delete_limit_fraction: 0.1

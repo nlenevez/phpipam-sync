@@ -1,0 +1,20 @@
+{
+  "address_count": 5,
+  "dropped_source_fields": {},
+  "exported_at": "2026-07-23T05:13:37Z",
+  "files": {
+    "sections/shared/10.20.0.0_16.json": "7bf10872e6e765792bcc707b3b2a25111556be073d7f2fcf6bd885ff1c62e6d3",
+    "sections/shared/10.20.5.0_24.json": "2d8229c95adb22282b4702fd5749af3bebc77eafecfe5cac55763c6d1271377a",
+    "sections/shared/10.30.0.0_24.json": "d9c38965a0026039224801cb1b844aec096452fcd3274e5c98933b8bfedda692",
+    "sections/shared/2001-db8-5--_64.json": "4bdfd754e91b3ed7df72708552a64fd80b6558da7408611dc09149e6a6d96f8c"
+  },
+  "schema_version": 1,
+  "sections": [
+    "Shared"
+  ],
+  "source": {
+    "app_id": "sync",
+    "base_url": "https://127.0.0.1:8443"
+  },
+  "subnet_count": 4
+}

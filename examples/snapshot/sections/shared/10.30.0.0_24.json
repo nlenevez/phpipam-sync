@@ -1,0 +1,41 @@
+{
+  "addresses": [
+    {
+      "fields": {
+        "AssetTag": "",
+        "PTRignore": "0",
+        "description": "standalone gateway",
+        "excludePing": "0",
+        "hostname": "standalone-gw",
+        "is_gateway": "1",
+        "mac": "",
+        "note": "",
+        "owner": "netops",
+        "port": "",
+        "tag": "2"
+      },
+      "ip": "10.30.0.1"
+    }
+  ],
+  "cidr": "10.30.0.0/24",
+  "fields": {
+    "DNSrecords": "0",
+    "DNSrecursive": "0",
+    "Owner": "",
+    "allowRequests": "0",
+    "custom_Notes": "",
+    "description": "Standalone /24",
+    "discoverSubnet": "0",
+    "isFolder": "0",
+    "isPool": "0",
+    "pingSubnet": "0",
+    "resolveDNS": "0",
+    "showName": "0",
+    "tag": "2",
+    "threshold": "0"
+  },
+  "master_subnet": null,
+  "schema_version": 1,
+  "section": "Shared",
+  "vlan": null
+}

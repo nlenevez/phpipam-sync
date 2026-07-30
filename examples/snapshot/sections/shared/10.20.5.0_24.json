@@ -1,0 +1,76 @@
+{
+  "addresses": [
+    {
+      "fields": {
+        "AssetTag": "ASSET-0042",
+        "PTRignore": "0",
+        "description": "gateway router",
+        "excludePing": "0",
+        "hostname": "gw-core",
+        "is_gateway": "1",
+        "mac": "aa:bb:cc:dd:ee:02",
+        "note": "",
+        "owner": "netops",
+        "port": "Gi0/0",
+        "tag": "2"
+      },
+      "ip": "10.20.5.2"
+    },
+    {
+      "fields": {
+        "AssetTag": "",
+        "PTRignore": "0",
+        "description": "access switch",
+        "excludePing": "0",
+        "hostname": "sw10",
+        "is_gateway": "0",
+        "mac": "aa:bb:cc:dd:ee:10",
+        "note": "",
+        "owner": "netops",
+        "port": "Gi1/0/1",
+        "tag": "2"
+      },
+      "ip": "10.20.5.10"
+    },
+    {
+      "fields": {
+        "AssetTag": "",
+        "PTRignore": "0",
+        "description": "floor 2 printer",
+        "excludePing": "0",
+        "hostname": "printer",
+        "is_gateway": "0",
+        "mac": "aa:bb:cc:dd:ee:20",
+        "note": "",
+        "owner": "facilities",
+        "port": "",
+        "tag": "2"
+      },
+      "ip": "10.20.5.20"
+    }
+  ],
+  "cidr": "10.20.5.0/24",
+  "fields": {
+    "DNSrecords": "0",
+    "DNSrecursive": "0",
+    "Owner": "netops-team",
+    "allowRequests": "0",
+    "custom_Notes": "prefixed note",
+    "description": "Shared /24",
+    "discoverSubnet": "0",
+    "isFolder": "0",
+    "isPool": "0",
+    "pingSubnet": "1",
+    "resolveDNS": "0",
+    "showName": "0",
+    "tag": "2",
+    "threshold": "0"
+  },
+  "master_subnet": "10.20.0.0/16",
+  "schema_version": 1,
+  "section": "Shared",
+  "vlan": {
+    "name": "shared-vlan",
+    "number": "100"
+  }
+}

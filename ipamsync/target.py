@@ -1,0 +1,323 @@
+"""
+ipamsync.target
+
+Reading the target instance's current state, and executing a plan
+against it.
+
+## Reads are cached, deliberately
+
+A plan is built by asking "does this subnet exist? do these addresses
+exist?" for every record in the snapshot. Asking phpIPAM that
+per-record would be one HTTP request per address on a subnet that might
+hold hundreds. TargetView instead fetches each section's subnets once
+and each subnet's addresses once, and indexes them by natural key. A
+sync of a few thousand addresses costs a handful of requests.
+
+The cache is invalidated narrowly after a create, so a subnet created
+early in a run is visible to the addresses planned into it later.
+
+## Writes are confirmed, not assumed
+
+Every write method in the vendored client is documented as unverified
+against a live phpIPAM instance -- the response shape of a POST comes
+from the API docs, not from observation. `resolve_created()` therefore
+never trusts the id a create returns: it re-reads the record by natural
+key and uses the id it finds. If a create silently no-ops, the re-read
+fails and the run stops with a clear error, instead of the next 200
+addresses being written against a bogus subnet id.
+"""
+
+import re
+
+from ipamsync import model
+from ipamsync.model import CUSTOM_FIELD_PREFIX
+from ipamsync.plan import split_cidr
+from ipamsync.snapshot import canonical_cidr
+
+
+class TargetError(Exception):
+    """Raised when the target instance is in a state the importer cannot
+    safely proceed from."""
+
+
+class TargetView:
+    """Cached, natural-key-indexed view of the target instance."""
+
+    def __init__(self, client):
+        self._client = client
+        self._sections = None
+        self._subnets = {}     # section_id -> {cidr: raw subnet}
+        self._addresses = {}   # subnet_id  -> {ip: raw address}
+
+    # -- Sections ------------------------------------------------------
+
+    def _load_sections(self):
+        if self._sections is None:
+            self._sections = self._client.get_sections()
+        return self._sections
+
+    def section_by_name(self, name):
+        """Case-insensitive match -- phpIPAM section names are free text
+        and 'Shared' vs 'shared' across two instances is a configuration
+        slip, not a reason to create a duplicate section."""
+        wanted = str(name).strip().casefold()
+        for section in self._load_sections():
+            if str(section.get("name", "")).strip().casefold() == wanted:
+                return section
+        return None
+
+    def invalidate_sections(self):
+        self._sections = None
+
+    # -- Subnets -------------------------------------------------------
+
+    def subnets_by_cidr(self, section_id):
+        """All subnets in a section, indexed by canonical CIDR.
+
+        Includes nested subnets: phpIPAM's sections/{id}/subnets/ returns
+        every subnet in the section regardless of nesting depth, which is
+        what we want -- a child subnet is matched by its own CIDR, not by
+        where it sits in the tree.
+        """
+        if section_id not in self._subnets:
+            index = {}
+            for raw in self._client.get_subnets_in_section(section_id):
+                if not raw.get("subnet") or raw.get("mask") in (None, ""):
+                    continue  # folders and malformed rows have no network
+                try:
+                    key = canonical_cidr(raw["subnet"], raw["mask"])
+                except ValueError:
+                    continue
+                # Flattened so custom fields compare against the
+                # snapshot, which stores them flat -- see
+                # model.flatten_custom_fields.
+                index[key] = model.flatten_custom_fields(raw)
+            self._subnets[section_id] = index
+        return self._subnets[section_id]
+
+    def invalidate_subnets(self, section_id):
+        self._subnets.pop(section_id, None)
+
+    # -- Addresses -----------------------------------------------------
+
+    def addresses_by_ip(self, subnet_id):
+        if subnet_id not in self._addresses:
+            index = {}
+            for raw in self._client.get_addresses_in_subnet(subnet_id):
+                ip = raw.get("ip")
+                if ip:
+                    index[str(ip)] = model.flatten_custom_fields(raw)
+            self._addresses[subnet_id] = index
+        return self._addresses[subnet_id]
+
+    def invalidate_addresses(self, subnet_id):
+        self._addresses.pop(subnet_id, None)
+
+
+def _split_fields(fields):
+    """Separates custom fields from stock ones. Both go on the wire the
+    same way; they are split only so a rejected custom field can be named
+    precisely in the error message (the overwhelmingly common cause of a
+    write failing on an otherwise-healthy target is a custom field that
+    exists on the source instance but was never created on the target)."""
+    stock, custom = {}, {}
+    for key, value in fields.items():
+        (custom if key.startswith(CUSTOM_FIELD_PREFIX) else stock)[key] = value
+    return stock, custom
+
+
+class Executor:
+    """Runs a plan's write actions against the target instance.
+
+    Failures are per-record: one address that phpIPAM rejects is
+    recorded and the run continues. A one-way sync that aborts on the
+    first bad record would need a human to intervene before *any* of the
+    remaining good records landed, and the next run would hit the same
+    record and stop again. Errors are collected and reported at the end,
+    and the exit status reflects them.
+    """
+
+    def __init__(self, client, view, config, logger):
+        self._client = client
+        self._view = view
+        self._config = config
+        self._log = logger
+        self._section_ids = {}   # source section name -> target section id
+        self._subnet_ids = {}    # (section id, cidr)   -> target subnet id
+        self.errors = []
+        self.applied = 0
+
+    # -- id resolution --------------------------------------------------
+
+    def _section_id(self, source_section):
+        from ipamsync.config import target_section_name
+
+        if source_section in self._section_ids:
+            return self._section_ids[source_section]
+        wanted = target_section_name(self._config, source_section)
+        section = self._view.section_by_name(wanted)
+        if not section:
+            raise TargetError(
+                f"Section {wanted!r} not found on the target while applying. "
+                f"It existed at plan time or was created earlier in this run; "
+                f"something else changed the target concurrently."
+            )
+        self._section_ids[source_section] = section["id"]
+        return section["id"]
+
+    def _subnet_id(self, source_section, cidr):
+        section_id = self._section_id(source_section)
+        cached = self._subnet_ids.get((section_id, cidr))
+        if cached is not None:
+            return cached
+        subnet = self._view.subnets_by_cidr(section_id).get(cidr)
+        if not subnet:
+            raise TargetError(
+                f"Subnet {cidr} not found in target section id {section_id} "
+                f"while applying. Expected it to exist or to have been "
+                f"created earlier in this run."
+            )
+        self._subnet_ids[(section_id, cidr)] = subnet["id"]
+        return subnet["id"]
+
+    # -- actions --------------------------------------------------------
+
+    def apply(self, actions):
+        for action in actions:
+            if not action.is_write:
+                continue
+            try:
+                handler = getattr(self, f"_do_{action.kind}")
+                handler(action)
+                self.applied += 1
+            except Exception as exc:  # noqa: BLE001 -- per-record isolation
+                self._record_error(action, exc)
+        return self.applied, self.errors
+
+    #: phpIPAM's own wording when a write names a column it does not have.
+    _INVALID_KEY = re.compile(r"Invalid request key (\S+)")
+
+    def _record_error(self, action, exc):
+        message = f"{action.kind} {action.key}: {exc}"
+
+        # phpIPAM names the offending column, so quote THAT rather than
+        # guessing from the payload. The previous version listed whatever
+        # `custom_*` fields the record happened to carry, which pointed at
+        # the wrong field entirely whenever the real culprit was a custom
+        # field without that prefix -- exactly the common case, since
+        # phpIPAM does not require the prefix.
+        rejected = self._INVALID_KEY.search(str(exc))
+        if rejected:
+            field = rejected.group(1)
+            message += (
+                f"  ({field!r} exists on the source instance but not on this "
+                f"one. If it is a custom field, create it here too under "
+                f"Administration > Custom fields, with the same name. Custom "
+                f"fields are NOT created automatically -- they are schema, "
+                f"not data.)"
+            )
+        else:
+            _, custom = _split_fields(action.detail.get("fields", action.detail))
+            if custom and "custom" not in str(exc).lower():
+                message += (
+                    f"  (this record carries custom field(s) "
+                    f"{sorted(custom)} -- confirm they exist on the target "
+                    f"instance under Administration > Custom fields)"
+                )
+        self.errors.append(message)
+        self._log(f"  ERROR  {message}")
+
+    def _do_create_section(self, action):
+        self._client.create_section(action.detail["name"])
+        # Do not trust the returned id -- confirm by re-reading.
+        self._view.invalidate_sections()
+        if not self._view.section_by_name(action.detail["name"]):
+            raise TargetError(
+                f"created section {action.detail['name']!r} but it is not "
+                f"visible on re-read -- treating as a failed write"
+            )
+
+    def _do_create_subnet(self, action):
+        section_id = self._section_id(action.section)
+        network, prefix = split_cidr(action.cidr)
+        extra = model.to_subnet_write_fields(action.detail["fields"])
+
+        parent_cidr = action.detail.get("master_subnet")
+        if parent_cidr:
+            parent = self._view.subnets_by_cidr(section_id).get(parent_cidr)
+            if parent:
+                extra["masterSubnetId"] = parent["id"]
+            else:
+                self._log(
+                    f"  NOTE   {action.cidr} nests under {parent_cidr} on the "
+                    f"source, which is not present on the target -- creating "
+                    f"it top-level in the section instead"
+                )
+
+        self._client.create_subnet(
+            subnet=network, mask=prefix, section_id=section_id, **extra
+        )
+        # Confirm by natural key rather than trusting the POST's return.
+        self._view.invalidate_subnets(section_id)
+        if action.cidr not in self._view.subnets_by_cidr(section_id):
+            raise TargetError(
+                f"created subnet {action.cidr} but it is not visible on "
+                f"re-read of section id {section_id} -- treating as a failed "
+                f"write (nothing further will be written into this subnet)"
+            )
+
+    def _do_update_subnet(self, action):
+        subnet_id = self._subnet_id(action.section, action.cidr)
+        self._client.update_subnet(
+            subnet_id, **model.to_subnet_write_fields(action.detail)
+        )
+
+    def _do_create_address(self, action):
+        subnet_id = self._subnet_id(action.section, action.cidr)
+        fields = dict(action.detail["fields"])
+        hostname = fields.pop("hostname", None)
+        description = fields.pop("description", None)
+        self._client.create_address(
+            subnet_id=subnet_id, ip=action.ip,
+            hostname=hostname, description=description, **fields,
+        )
+        self._view.invalidate_addresses(subnet_id)
+
+    def _do_delete_address(self, action):
+        subnet_id = self._subnet_id(action.section, action.cidr)
+        existing = self._view.addresses_by_ip(subnet_id).get(action.ip)
+        if not existing:
+            # Already gone -- nothing to do, and not worth failing over.
+            return
+        self._client.delete_address(existing["id"])
+        self._view.invalidate_addresses(subnet_id)
+
+    def _do_delete_subnet(self, action):
+        section_id = self._section_id(action.section)
+        subnet = self._view.subnets_by_cidr(section_id).get(action.cidr)
+        if not subnet:
+            return
+        self._client.delete_subnet(subnet["id"])
+        self._view.invalidate_subnets(section_id)
+        self._view.invalidate_addresses(subnet["id"])
+        self._subnet_ids.pop((section_id, action.cidr), None)
+        # Confirm by re-read rather than trusting the DELETE's response,
+        # for the same reason creates are confirmed: this endpoint has
+        # never been exercised against a live instance by the vendored
+        # client, and a silent no-op would otherwise look like success.
+        if action.cidr in self._view.subnets_by_cidr(section_id):
+            raise TargetError(
+                f"deleted subnet {action.cidr} but it is still present on "
+                f"re-read of section id {section_id} -- treating as a "
+                f"failed write"
+            )
+
+    def _do_update_address(self, action):
+        subnet_id = self._subnet_id(action.section, action.cidr)
+        existing = self._view.addresses_by_ip(subnet_id).get(action.ip)
+        if not existing:
+            raise TargetError(
+                f"address {action.ip} vanished from {action.cidr} between "
+                f"plan and apply"
+            )
+        self._client.update_address(existing["id"], **action.detail)
