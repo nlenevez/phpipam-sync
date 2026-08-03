@@ -1,4 +1,16 @@
 {
+  "folders": [
+    [
+      "Datacentre"
+    ],
+    [
+      "Spare"
+    ],
+    [
+      "Datacentre",
+      "Rack A"
+    ]
+  ],
   "kind": "section",
   "schema_version": 2,
   "section": "Shared",

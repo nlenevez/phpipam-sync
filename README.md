@@ -65,7 +65,7 @@ reproducible rather than a claim:
 cd lab && ./setup.sh
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
-./verify.sh           # 1:1 replication        -- 66 assertions
+./verify.sh           # 1:1 replication        -- 75 assertions
 ./verify-fanin.sh     # many-to-one fan-in     -- 22 assertions
 ./verify-catchup.sh   # mirror-outage recovery -- 14 assertions
 docker compose down
@@ -73,7 +73,7 @@ docker compose down
 PHPIPAM_VERSION=v1.7.4 ./verify.sh          # or any published tag
 ```
 
-Plus **165 unit/integration tests** needing no network, phpIPAM, or
+Plus **172 unit/integration tests** needing no network, phpIPAM, or
 credentials. CI runs them on every push.
 
 ### What is not proven
@@ -177,8 +177,12 @@ every address inside them (hostname, description, MAC, owner, note, port,
 gateway flag, ping/PTR flags) — plus **custom fields** on both. IPv4 and
 IPv6 alike.
 
-**Also replicated: L2 domains, VLANs and VRFs**, and each subnet's link
-to them. These are carried as records in their own right, so a VLAN or
+**Also replicated: folders, L2 domains, VLANs and VRFs**, and each
+subnet's link to them. A phpIPAM folder is a `subnets` row with
+`isFolder=1` and no network of its own, named by its `description`;
+folders replicate by **path** (a list of names, since a folder name may
+itself contain a slash), empty ones included, and a subnet inside one
+lands inside it on the target. These are carried as records in their own right, so a VLAN or
 VRF defined upstream but attached to nothing still appears on the target
 — defining one is a deliberate act at the source, and a one-way link
 gives the target no way to ask for it later. Their natural keys are a
@@ -592,9 +596,9 @@ a failing `token_command` reports its stderr, never its stdout.
 
 ## What real phpIPAM taught us
 
-Five bugs that no amount of testing against a fake would have caught,
+Six bugs that no amount of testing against a fake would have caught,
 because the fake behaved the way phpIPAM's *documentation* implies. All
-five are documented with the exact requests and responses in
+six are documented with the exact requests and responses in
 [`lab/README.md`](lab/README.md).
 
 1. **Empty collections are HTTP 404**, not an empty list. Broke exporting
@@ -612,6 +616,10 @@ five are documented with the exact requests and responses in
    masterSubnetId` accepts anything — so inserting an intermediate
    aggregate upstream could not be applied naively, and re-parenting has
    to detach before it creates.
+6. **A folder is a subnet row that the subnet endpoint will not serve.**
+   `GET subnets/{id}/` on a folder answers `404`, and phpIPAM lists
+   folders *first* — which quietly broke custom-field discovery, since it
+   probes the first record it sees.
 
 The lesson generalises: the write path of a client built from
 documentation is unproven until it has run against the real server.
@@ -621,7 +629,7 @@ documentation is unproven until it has run against the real server.
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests -v          # 165 tests, no network
+python3 -m unittest discover -s tests -v          # 172 tests, no network
 ```
 
 The suite includes **deliberate negative controls** throughout — every

@@ -24,13 +24,14 @@ class FakeTarget:
     """Stands in for TargetView, exposing the methods build_plan() uses."""
 
     def __init__(self, sections=None, subnets=None, addresses=None,
-                 domains=None, vlans=None, vrfs=None):
+                 domains=None, vlans=None, vrfs=None, folders=None):
         self._sections = sections or {}          # name -> {"id": n}
         self._subnets = subnets or {}            # section id -> {cidr: raw}
         self._addresses = addresses or {}        # subnet id -> {ip: raw}
         self._domains = domains or {}            # name -> raw
         self._vlans = vlans or {}                # (domain, number) -> raw
         self._vrfs = vrfs or {}                  # name -> raw
+        self._folders = folders or {}            # section id -> {path: raw}
 
     def section_by_name(self, name):
         for existing, value in self._sections.items():
@@ -43,6 +44,15 @@ class FakeTarget:
 
     def addresses_by_ip(self, subnet_id):
         return self._addresses.get(subnet_id, {})
+
+    def folders_by_path(self, section_id):
+        return self._folders.get(section_id, {})
+
+    def folder_path_for_id(self, section_id, folder_id):
+        for path, raw in self._folders.get(section_id, {}).items():
+            if str(raw.get("id")) == str(folder_id):
+                return path
+        return None
 
     def domain_by_name(self, name):
         return self._domains.get(str(name).casefold())

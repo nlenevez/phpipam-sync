@@ -93,6 +93,9 @@ WRITE_KINDS = (
     # it -- see "Re-parenting" in this module's docstring.
     "detach_subnet",
     "reparent_subnet",
+    # Folders come first of all: a subnet may live inside one, and a
+    # folder may only nest under another folder.
+    "create_folder",
     # L2 domains, VLANs and VRFs, planned before the subnets that
     # reference them so link_subnet always has something to resolve.
     "create_l2domain",
@@ -175,7 +178,9 @@ class Action:
             return f"{self.kind:16} {self.key}  [{', '.join(bits)}]"
         if self.kind == "reparent_subnet":
             was = self.detail.get("was") or "top level"
-            now = self.detail.get("master_subnet") or "top level"
+            folder = self.detail.get("parent_folder")
+            now = ("/".join(folder) if folder
+                   else self.detail.get("master_subnet") or "top level")
             return f"{self.kind:16} {self.key}  [{was} -> {now}]"
         if self.kind in ("drift_subnet", "drift_address", "note"):
             return f"{self.kind:16} {self.key}  -- {self.detail.get('reason', '')}"
@@ -317,6 +322,22 @@ def build_plan(documents, target, config):
         source_section = document["section"]
         section_id = section_ids[source_section]
 
+        # Folders, shallowest first, so a parent always exists before the
+        # child that names it. The snapshot already sorts them that way;
+        # sorting again here keeps the plan correct even for a snapshot
+        # written by hand.
+        existing_folders = (
+            target.folders_by_path(section_id) if section_id is not None else {}
+        )
+        for path in sorted((tuple(p) for p in document.get("folders") or []),
+                           key=lambda p: (len(p), p)):
+            if path in existing_folders:
+                continue
+            actions.append(Action(
+                "create_folder", "/".join(path), {"path": list(path)},
+                section=source_section,
+            ))
+
         for domain in document.get("vlan_domains") or []:
             name = domain.get("name")
             if not name:
@@ -417,6 +438,7 @@ def build_plan(documents, target, config):
                 {
                     "fields": document["fields"],
                     "master_subnet": document.get("master_subnet"),
+                    "parent_folder": document.get("parent_folder"),
                 },
                 section=source_section, cidr=cidr,
             ))
@@ -466,9 +488,33 @@ def build_plan(documents, target, config):
             # the field comparison can notice that a subnet was moved
             # under a different parent at the source. Compared here by
             # CIDR instead -- the same natural key the create path uses.
+            # The parent may be a subnet (a CIDR) or a folder (a path).
+            # phpIPAM stores both in masterSubnetId, so which it is
+            # depends on the row it points at -- compared here as
+            # whichever natural key applies.
+            wanted_folder = document.get("parent_folder")
+            wanted_folder = tuple(wanted_folder) if wanted_folder else None
+            current_folder = (
+                target.folder_path_for_id(section_id, current.get("masterSubnetId"))
+                if section_id is not None else None
+            )
             wanted_parent = document.get("master_subnet")
-            current_parent = _current_parent_cidr(current, cidr_by_id)
-            if wanted_parent != current_parent:
+            current_parent = (
+                None if current_folder
+                else _current_parent_cidr(current, cidr_by_id)
+            )
+            if wanted_folder or current_folder:
+                if wanted_folder != current_folder:
+                    actions.append(Action(
+                        "reparent_subnet", cidr,
+                        {"parent_folder": list(wanted_folder) if wanted_folder
+                         else None,
+                         "master_subnet": wanted_parent,
+                         "was": "/".join(current_folder) if current_folder
+                         else current_parent},
+                        section=source_section, cidr=cidr,
+                    ))
+            elif wanted_parent != current_parent:
                 # Only act when the new parent will actually exist on the
                 # target: either it is already there, or it is in this
                 # snapshot's section and so has been created earlier in

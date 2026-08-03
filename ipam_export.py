@@ -40,6 +40,47 @@ def log(message):
     print(message, flush=True)
 
 
+def _folder_paths(subnets):
+    """Maps folder id -> path, for every folder in one section.
+
+    A phpIPAM folder is a `subnets` row with isFolder=1: no network, and
+    its *name* held in `description` (see phpIPAM's own ordering clause,
+    `case isFolder when 1 then description`). Folders may only nest under
+    other folders -- the API refuses anything else with
+    `409 Parent is not a folder` -- so walking masterSubnetId upwards
+    always terminates at the section root.
+
+    Returns paths as lists of names. A cycle, which phpIPAM should never
+    produce, is broken rather than hung on.
+    """
+    folders = {
+        str(raw["id"]): raw for raw in subnets
+        if str(raw.get("isFolder") or "0") == "1"
+    }
+    paths = {}
+
+    def resolve(folder_id, seen):
+        if folder_id in paths:
+            return paths[folder_id]
+        raw = folders.get(folder_id)
+        if raw is None or folder_id in seen:
+            return None
+        seen.add(folder_id)
+        name = str(raw.get("description") or "").strip()
+        parent_id = str(raw.get("masterSubnetId") or "0")
+        if parent_id in ("0", "", "None") or parent_id not in folders:
+            path = [name]
+        else:
+            parent_path = resolve(parent_id, seen)
+            path = ([*parent_path, name] if parent_path else [name])
+        paths[folder_id] = path
+        return path
+
+    for folder_id in folders:
+        resolve(folder_id, set())
+    return paths
+
+
 def _section_ids(raw_value):
     """Parses phpIPAM's ";"-separated section-id list.
 
@@ -168,31 +209,54 @@ def export(config, out_dir, fail_on_empty=False):
         # rather than discovered while walking subnets.
         domains, vlans, vrfs, vlan_ref_by_id, vrf_name_by_id = _l2_context(
             client, section_id, options)
-        documents.append(build_section_document(
-            section_name=section_name, domains=domains,
-            vlans=vlans, vrfs=vrfs,
-        ))
+        # The section document is assembled after the subnets are read,
+        # because folders are subnets rows and their paths are not known
+        # until then.
         if vlans or vrfs:
             log(f"  {len(vlans)} vlan(s) in {len(domains)} l2 domain(s), "
                 f"{len(vrfs)} vrf(s)")
 
         subnets = client.get_subnets_in_section(section_id)
-        log(f"section {section_name!r} (id {section_id}): {len(subnets)} subnet(s)")
+        # Folders are subnets rows too. Separated here because phpIPAM
+        # sorts them FIRST (`order by isFolder desc`) and refuses to
+        # return one from the single-subnet endpoint -- GET subnets/{id}/
+        # on a folder answers 404 "No subnets found". Probing subnets[0]
+        # for custom-field names therefore hits a folder and fails, and
+        # the whole run silently degrades to reporting unprefixed custom
+        # fields as dropped instead of carrying them.
+        real_subnets = [
+            raw for raw in subnets
+            if str(raw.get("isFolder") or "0") != "1"
+        ]
+        log(f"section {section_name!r} (id {section_id}): "
+            f"{len(real_subnets)} subnet(s)")
 
-        if not subnets and fail_on_empty:
+        if not real_subnets and fail_on_empty:
             raise ConfigError(
                 f"Section {section_name!r} contains no subnets. If that is "
                 f"genuinely correct, drop --fail-on-empty; otherwise check "
                 f"the API app's permissions on this section."
             )
 
-        if subnets and not custom_names["subnet"]:
+        if real_subnets and not custom_names["subnet"]:
             custom_names["subnet"] = _discover_custom_fields(
-                client.get_subnet, subnets[0]["id"], "subnet")
+                client.get_subnet, real_subnets[0]["id"], "subnet")
             if custom_names["subnet"]:
                 saw_nested_custom_fields = True
                 log(f"  custom subnet field(s): "
                     f"{', '.join(sorted(custom_names['subnet']))}")
+
+        # Folders are subnets rows too, with no network of their own.
+        # Resolved to paths so a subnet inside one can name its parent
+        # by natural key, and so folders replicate even when empty.
+        folder_paths = _folder_paths(subnets)
+        if folder_paths:
+            log(f"  {len(folder_paths)} folder(s)")
+
+        documents.append(build_section_document(
+            section_name=section_name, domains=domains,
+            vlans=vlans, vrfs=vrfs, folders=folder_paths.values(),
+        ))
 
         # id -> CIDR, so masterSubnetId can be recorded as a natural key.
         cidr_by_id = {}
@@ -206,9 +270,11 @@ def export(config, out_dir, fail_on_empty=False):
                     pass
 
         for raw in subnets:
+            if str(raw.get("isFolder") or "0") == "1":
+                continue  # replicated via the section document's folders
             if not raw.get("subnet") or raw.get("mask") in (None, ""):
                 log(f"  skipping subnet id {raw.get('id')} -- no network/mask "
-                    f"(phpIPAM folder?)")
+                    f"and not marked as a folder")
                 continue
             try:
                 cidr = canonical_cidr(raw["subnet"], raw["mask"])
@@ -225,7 +291,10 @@ def export(config, out_dir, fail_on_empty=False):
 
             master_id = raw.get("masterSubnetId")
             master_subnet = None
-            if master_id and str(master_id) not in ("0", ""):
+            parent_folder = folder_paths.get(str(master_id))
+            if parent_folder:
+                pass  # the parent is a folder, recorded by path below
+            elif master_id and str(master_id) not in ("0", ""):
                 master_subnet = cidr_by_id.get(str(master_id))
                 if master_subnet is None:
                     log(f"  note: {cidr} nests under subnet id {master_id}, "
@@ -259,6 +328,7 @@ def export(config, out_dir, fail_on_empty=False):
                 fields=fields,
                 addresses=addresses,
                 master_subnet=master_subnet,
+                parent_folder=parent_folder,
                 vlan=vlan_ref_by_id.get(str(raw.get("vlanId") or "")),
                 vrf=(
                     {"name": vrf_name_by_id[str(raw.get("vrfId"))]}

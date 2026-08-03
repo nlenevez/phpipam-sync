@@ -161,6 +161,16 @@ print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId
 print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,state) "
       f"VALUES (14,'{d('192.168.99.0')}','24',2,'Local only subnet',0,2);")
 print("UPDATE subnets SET `Owner`='netops-team', custom_Notes='prefixed note' WHERE id=12;")
+# Folders: subnets rows with isFolder=1, no network, name in
+# `description`. One nested under another, one left empty, and an
+# existing subnet moved inside -- folders may only nest under folders.
+print("INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,isFolder,state) "
+      "VALUES (20,'0',NULL,1,'Datacentre',0,1,2);")
+print("INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,isFolder,state) "
+      "VALUES (21,'0',NULL,1,'Rack A',20,1,2);")
+print("INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,isFolder,state) "
+      "VALUES (22,'0',NULL,1,'Spare',0,1,2);")
+print("UPDATE subnets SET masterSubnetId=21 WHERE id=13;")
 # IPv6, to prove the CIDR handling is not quietly IPv4-only.
 print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,state) "
       f"VALUES (15,'{d('2001:db8:5::')}','64',1,'Shared v6 /64',0,2);")

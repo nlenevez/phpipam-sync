@@ -36,6 +36,10 @@
   },
   "kind": "subnet",
   "master_subnet": null,
+  "parent_folder": [
+    "Datacentre",
+    "Rack A"
+  ],
   "schema_version": 2,
   "section": "Shared",
   "vlan": null,

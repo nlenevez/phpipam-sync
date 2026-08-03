@@ -130,19 +130,30 @@ def _ip_sort_key(ip):
 SECTION_META_NAME = "_section.json"
 
 
-def build_section_document(*, section_name, domains, vlans, vrfs):
+def build_section_document(*, section_name, domains, vlans, vrfs, folders=()):
     """Assembles the per-section record of L2 domains, VLANs and VRFs.
 
     These are replicated whether or not any subnet references them, so
     they cannot be carried on the subnet documents -- an unattached VLAN
     would have nowhere to live. Each is identified by natural key:
     a domain by name, a VLAN by (domain name, number), a VRF by name
-    within this section.
+    within this section, and a folder by its path.
+
+    A folder path is a LIST of names, not a "a/b" string. phpIPAM folder
+    names are free text and may themselves contain a slash, which a
+    string path could not represent without an escaping scheme nobody
+    would get right on the first try.
     """
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "section",
         "section": section_name,
+        # Sorted so a parent always precedes its children, which is the
+        # order they have to be created in.
+        "folders": sorted(
+            (list(path) for path in folders),
+            key=lambda path: (len(path), path),
+        ),
         "vlan_domains": sorted(domains, key=lambda d: str(d.get("name") or "")),
         "vlans": sorted(
             vlans,
@@ -162,7 +173,8 @@ def _vlan_sort_key(vlan):
 
 
 def build_subnet_document(*, section_name, cidr, fields, addresses,
-                          master_subnet=None, vlan=None, vrf=None):
+                          master_subnet=None, vlan=None, vrf=None,
+                          parent_folder=None):
     """Assembles one subnet's document. `addresses` is an iterable of
     (ip, fields) pairs; they are sorted here so callers need not care.
 
@@ -170,6 +182,11 @@ def build_subnet_document(*, section_name, cidr, fields, addresses,
     and {"name"} -- not the records themselves, which live in the section
     document. Carrying the id would point at an unrelated row on the
     target, the same trap as masterSubnetId.
+
+    A subnet's parent is either another subnet (`master_subnet`, a CIDR)
+    or a folder (`parent_folder`, a path), never both: phpIPAM stores
+    both in masterSubnetId, and which one it is depends on the row it
+    points at.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -177,6 +194,7 @@ def build_subnet_document(*, section_name, cidr, fields, addresses,
         "section": section_name,
         "cidr": cidr,
         "master_subnet": master_subnet,
+        "parent_folder": list(parent_folder) if parent_folder else None,
         "vlan": vlan,
         "vrf": vrf,
         "fields": fields,

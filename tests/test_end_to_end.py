@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import ipam_export  # noqa: E402
 from ipamsync.plan import build_plan, canonicalise_document_cidr  # noqa: E402
-from ipamsync.snapshot import read_snapshot  # noqa: E402
+from ipamsync.snapshot import partition_documents, read_snapshot  # noqa: E402
 from ipamsync.target import Executor, TargetView  # noqa: E402
 
 
@@ -127,6 +127,21 @@ class FakePhpIpam:
         self.addresses.append(record)
         return record["id"]
 
+    def add_folder(self, section_id, name, master_subnet_id=None):
+        """A phpIPAM folder: a subnets row with isFolder=1, no network,
+        and its name held in `description`."""
+        record = {
+            "id": self._new_id(),
+            "subnet": "0.0.0.0",
+            "mask": None,
+            "sectionId": str(section_id),
+            "masterSubnetId": str(master_subnet_id) if master_subnet_id else "0",
+            "description": name,
+            "isFolder": "1",
+        }
+        self.subnets.append(record)
+        return record["id"]
+
     def add_vlan(self, number, name, domain_id="1"):
         vlan = {"id": self._new_id(), "number": str(number), "name": name,
                 "domainId": str(domain_id), "description": ""}
@@ -160,13 +175,22 @@ class FakePhpIpam:
         return [dict(section) for section in self.sections]
 
     def get_subnets_in_section(self, section_id):
-        return [self._present(record, self.custom_subnet_fields, False)
-                for record in self.subnets
+        # phpIPAM sorts folders first (`order by isFolder desc`), which
+        # is load-bearing: it is why the custom-field probe used to land
+        # on a folder.
+        rows = [record for record in self.subnets
                 if record["sectionId"] == str(section_id)]
+        rows.sort(key=lambda r: str(r.get("isFolder") or "0") != "1")
+        return [self._present(record, self.custom_subnet_fields, False)
+                for record in rows]
 
     def get_subnet(self, subnet_id):
         for record in self.subnets:
             if record["id"] == str(subnet_id):
+                if str(record.get("isFolder") or "0") == "1":
+                    # phpIPAM's single-subnet endpoint refuses folders:
+                    # GET subnets/{id}/ -> 404 "No subnets found".
+                    return None
                 return self._present(record, self.custom_subnet_fields, True)
         return None
 
@@ -681,6 +705,114 @@ class TestReparenting(unittest.TestCase):
         self.assertEqual(errors, [])
         child = self.target.subnet_by_cidr("10.20.5.0/24")
         self.assertEqual(child["masterSubnetId"], "0")
+
+
+class TestFolders(unittest.TestCase):
+    """phpIPAM folders are subnets rows with isFolder=1 and no network.
+
+    They were skipped outright by the exporter before this, so a subnet
+    living inside one arrived on the target at the top of its section --
+    the data was right and the structure was silently wrong, which is the
+    failure mode hardest to notice.
+    """
+
+    def setUp(self):
+        self.config = make_config()
+        self.source, self.section_id = populated_source()
+        self.dc = self.source.add_folder(self.section_id, "Datacentre")
+        self.rack = self.source.add_folder(self.section_id, "Rack A",
+                                           master_subnet_id=self.dc)
+        # An empty folder, which must replicate anyway.
+        self.source.add_folder(self.section_id, "Spare")
+        self.source.subnet_by_cidr("10.20.5.0/24")["masterSubnetId"] = self.rack
+
+        self.target = FakePhpIpam(first_id=500)
+        self.target.add_section("Shared")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.snapshot_dir = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+
+    def _sync(self):
+        run_export(self.source, self.snapshot_dir, self.config)
+        return run_import(self.target, self.snapshot_dir, self.config, apply=True)
+
+    def _target_folder(self, name):
+        for record in self.target.subnets:
+            if (str(record.get("isFolder") or "0") == "1"
+                    and record.get("description") == name):
+                return record
+        return None
+
+    def test_folders_replicate_including_empty_ones(self):
+        self._sync()
+        self.assertIsNotNone(self._target_folder("Datacentre"))
+        self.assertIsNotNone(self._target_folder("Rack A"))
+        self.assertIsNotNone(self._target_folder("Spare"),
+                             "an empty folder must still replicate")
+
+    def test_folder_nesting_is_rebuilt_by_path(self):
+        self._sync()
+        dc = self._target_folder("Datacentre")
+        rack = self._target_folder("Rack A")
+        self.assertEqual(rack["masterSubnetId"], dc["id"])
+        # and not the source's id for it
+        self.assertNotEqual(rack["masterSubnetId"], self.dc)
+
+    def test_a_subnet_inside_a_folder_lands_inside_it(self):
+        self._sync()
+        rack = self._target_folder("Rack A")
+        child = self.target.subnet_by_cidr("10.20.5.0/24")
+        self.assertEqual(child["masterSubnetId"], rack["id"])
+        self.assertNotEqual(child["masterSubnetId"], self.rack)
+
+    def test_a_folder_is_not_exported_as_a_subnet(self):
+        run_export(self.source, self.snapshot_dir, self.config)
+        manifest, documents = read_snapshot(self.snapshot_dir)
+        subnets, sections = partition_documents(documents)
+        self.assertEqual(manifest["subnet_count"], len(subnets))
+        self.assertNotIn(None, [d.get("cidr") for d in subnets])
+        paths = sections[0]["folders"]
+        self.assertIn(["Datacentre"], paths)
+        self.assertIn(["Datacentre", "Rack A"], paths)
+        # Parents before children, which is the order they must be made in.
+        self.assertLess(paths.index(["Datacentre"]),
+                        paths.index(["Datacentre", "Rack A"]))
+
+    def test_moving_a_subnet_out_of_a_folder_moves_it_on_the_target(self):
+        self._sync()
+        self.source.subnet_by_cidr("10.20.5.0/24")["masterSubnetId"] = "0"
+        actions, applied, errors = self._sync()
+        self.assertEqual(errors, [])
+        self.assertIn("reparent_subnet", [a.kind for a in actions])
+        self.assertEqual(
+            self.target.subnet_by_cidr("10.20.5.0/24")["masterSubnetId"], "0")
+
+    def test_custom_fields_still_discovered_when_a_folder_sorts_first(self):
+        """phpIPAM returns folders first and refuses to serve one from
+        the single-subnet endpoint, so probing subnets[0] for custom
+        field names lands on a folder and fails. The whole run then
+        degrades quietly: unprefixed custom fields get reported as
+        dropped instead of replicated."""
+        source = FakePhpIpam(custom_subnet_fields={"Owner"})
+        section = source.add_section("Shared")
+        source.add_folder(section, "Datacentre")
+        # Owner is null here, which is the case that needs the probe:
+        # phpIPAM leaks such columns flat rather than nesting them.
+        source.add_subnet(section, "10.20.9.0", 24, description="plain",
+                          Owner="")
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = run_export(source, tmp, make_config())
+        self.assertNotIn("Owner",
+                         manifest["dropped_source_fields"].get("subnet", []))
+
+    def test_steady_state_with_folders_is_a_no_op(self):
+        """Negative control. Folder paths are compared against local ids,
+        the same shape of comparison that caused the endless-update loop
+        on custom fields."""
+        self._sync()
+        actions, applied, errors = self._sync()
+        self.assertEqual([a.kind for a in actions if a.is_write], [])
+        self.assertEqual(applied, 0)
 
 
 if __name__ == "__main__":

@@ -56,7 +56,13 @@ empty collection** rather than an empty list. See `lab/README.md`.
 
 ### `_section.json` — the VLANs and VRFs
 
-One per section, holding its L2 domains, VLANs and VRFs. They live here
+One per section, holding its folders, L2 domains, VLANs and VRFs.
+
+`folders` are paths — **lists** of names, not `"a/b"` strings, because a
+phpIPAM folder name is free text and may contain a slash. They are sorted
+shallowest-first, which is the order they have to be created in: phpIPAM
+refuses a folder whose parent is not itself a folder.
+ They live here
 rather than on the subnets that use them because they replicate whether
 or not anything references them — note `voice` and `CUST-B`, which
 nothing points at, and `mgmt` on VLAN 9, which is there to prove numbers

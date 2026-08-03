@@ -131,12 +131,15 @@ say "4. apply"
 import_now --apply > "$WORK/apply.log" 2>&1
 RC=$?
 check "apply exit status" "0" "$RC"
-grep -q "applied 17 change(s), 0 error(s)" "$WORK/apply.log" \
-    && pass "17 changes applied, no errors" \
+grep -q "applied 20 change(s), 0 error(s)" "$WORK/apply.log" \
+    && pass "20 changes applied, no errors" \
     || fail "unexpected apply result: $(grep -E '^applied' "$WORK/apply.log")"
 
 say "5. the replica matches, with its own ids"
-check "replica subnet count"  "4" "$(sql2 'SELECT COUNT(*) FROM subnets;')"
+# isFolder=0: folders live in the same table and are counted separately
+# at step 11c.
+check "replica subnet count"  "4" \
+      "$(sql2 'SELECT COUNT(*) FROM subnets WHERE isFolder=0;')"
 check "replica address count" "5" "$(sql2 'SELECT COUNT(*) FROM ipaddresses;')"
 
 SRC_ID=$(sql1 "SELECT id FROM subnets WHERE subnet=INET_ATON('10.20.5.0') AND mask=24;")
@@ -332,6 +335,50 @@ import_now --apply > "$WORK/vlanmove2.log" 2>&1
 grep -q "changes: none" "$WORK/vlanmove2.log" \
     && pass "VLAN link is idempotent (no churn on the next run)" \
     || fail "VLAN link churns: $(grep -E '^applied' "$WORK/vlanmove2.log")"
+
+say "11c. folders replicate, and subnets land inside them"
+# A phpIPAM folder is a subnets row with isFolder=1 and no network, its
+# name held in `description`. The exporter used to skip those rows
+# outright, so a subnet inside one arrived at the top of its section --
+# right data, silently wrong structure.
+check "top-level folder replicated" "1" \
+      "$(sql2 "SELECT COUNT(*) FROM subnets WHERE isFolder=1 AND description='Datacentre';")"
+check "nested folder replicated"    "1" \
+      "$(sql2 "SELECT COUNT(*) FROM subnets WHERE isFolder=1 AND description='Rack A';")"
+check "EMPTY folder replicated"     "1" \
+      "$(sql2 "SELECT COUNT(*) FROM subnets WHERE isFolder=1 AND description='Spare';")"
+
+DST_DC=$(sql2 "SELECT id FROM subnets WHERE isFolder=1 AND description='Datacentre';")
+DST_RACK=$(sql2 "SELECT id FROM subnets WHERE isFolder=1 AND description='Rack A';")
+check "folder nesting rebuilt by path" "$DST_DC" \
+      "$(sql2 "SELECT masterSubnetId FROM subnets WHERE id=$DST_RACK;")"
+SRC_RACK=$(sql1 "SELECT id FROM subnets WHERE isFolder=1 AND description='Rack A';")
+[ -n "$DST_RACK" ] && [ "$SRC_RACK" != "$DST_RACK" ] \
+    && pass "and with the replica's own folder id ($SRC_RACK vs $DST_RACK)" \
+    || fail "folder ids did not diverge (src=$SRC_RACK dst=$DST_RACK)"
+
+DST_INFOLDER=$(sql2 "SELECT id FROM subnets WHERE subnet=INET_ATON('10.30.0.0') AND mask=24;")
+check "subnet placed inside the folder" "$DST_RACK" \
+      "$(sql2 "SELECT masterSubnetId FROM subnets WHERE id=$DST_INFOLDER;")"
+
+# Folders must not be mistaken for subnets in either direction. Compared
+# against the source's own non-folder count rather than a fixed number,
+# because step 11 legitimately adds a subnet upstream before this runs.
+check "folders not counted as subnets in the snapshot" \
+      "$(sql1 'SELECT COUNT(*) FROM subnets WHERE sectionId=1 AND isFolder=0;')" \
+      "$(python3 -c 'import json;print(json.load(open("'"$WORK"'/side1-data/manifest.json"))["subnet_count"])')"
+
+# Moving a subnet out of a folder must propagate, like any re-parent.
+sql1 "UPDATE subnets SET masterSubnetId=0 WHERE id=13;" >/dev/null
+export_now >/dev/null 2>&1
+ship
+import_now --apply > "$WORK/folder-move.log" 2>&1
+check "subnet moved out of the folder" "0" \
+      "$(sql2 "SELECT masterSubnetId FROM subnets WHERE id=$DST_INFOLDER;")"
+import_now --apply > "$WORK/folder-move2.log" 2>&1
+grep -q "changes: none" "$WORK/folder-move2.log" \
+    && pass "folder placement is idempotent (no churn on the next run)" \
+    || fail "folder placement churns: $(grep -E '^applied' "$WORK/folder-move2.log")"
 
 say "12. strict mirror: --delete removes what the snapshot dropped"
 # Up to here the run has been additive, so the replica still holds

@@ -50,6 +50,7 @@ class TargetView:
         self._subnets = {}     # section_id -> {cidr: raw subnet}
         self._addresses = {}   # subnet_id  -> {ip: raw address}
         self._l2 = None        # domains/vlans/vrfs, indexed by natural key
+        self._folders = {}     # section_id -> ({path: raw}, {id: path})
 
     # -- Sections ------------------------------------------------------
 
@@ -99,6 +100,57 @@ class TargetView:
 
     def invalidate_subnets(self, section_id):
         self._subnets.pop(section_id, None)
+        self._folders.pop(section_id, None)
+
+    # -- Folders -------------------------------------------------------
+    #
+    # A phpIPAM folder is a `subnets` row with isFolder=1: no network,
+    # and its name in `description`. Indexed by path -- a tuple of names
+    # from the section root -- because names are not unique across
+    # different parents. Folders may only nest under folders (the API
+    # answers `409 Parent is not a folder` otherwise), so walking
+    # masterSubnetId upwards always terminates.
+
+    def folders_by_path(self, section_id):
+        if section_id not in self._folders:
+            raw_folders = {
+                str(raw["id"]): raw
+                for raw in self._client.get_subnets_in_section(section_id)
+                if str(raw.get("isFolder") or "0") == "1"
+            }
+            index, path_by_id = {}, {}
+
+            def resolve(folder_id, seen):
+                if folder_id in path_by_id:
+                    return path_by_id[folder_id]
+                raw = raw_folders.get(folder_id)
+                if raw is None or folder_id in seen:
+                    return None
+                seen.add(folder_id)
+                name = str(raw.get("description") or "").strip()
+                parent_id = str(raw.get("masterSubnetId") or "0")
+                if parent_id in ("0", "", "None") or parent_id not in raw_folders:
+                    path = (name,)
+                else:
+                    parent = resolve(parent_id, seen)
+                    path = ((*parent, name) if parent else (name,))
+                path_by_id[folder_id] = path
+                return path
+
+            for folder_id, raw in raw_folders.items():
+                path = resolve(folder_id, set())
+                if path:
+                    index[path] = raw
+            self._folders[section_id] = (index, path_by_id)
+        return self._folders[section_id][0]
+
+    def folder_path_for_id(self, section_id, folder_id):
+        """The path a subnet's masterSubnetId points at, when it points
+        at a folder, or None when it points at a subnet or nothing."""
+        if str(folder_id or "") in ("", "0", "None"):
+            return None
+        self.folders_by_path(section_id)
+        return self._folders[section_id][1].get(str(folder_id))
 
     # -- L2 domains, VLANs and VRFs ------------------------------------
     #
@@ -328,8 +380,20 @@ class Executor:
         network, prefix = split_cidr(action.cidr)
         extra = model.to_subnet_write_fields(action.detail["fields"])
 
+        parent_folder = action.detail.get("parent_folder")
         parent_cidr = action.detail.get("master_subnet")
-        if parent_cidr:
+        if parent_folder:
+            folder = self._view.folders_by_path(section_id).get(
+                tuple(parent_folder))
+            if folder:
+                extra["masterSubnetId"] = folder["id"]
+            else:
+                self._log(
+                    f"  NOTE   {action.cidr} lives in folder "
+                    f"{'/'.join(parent_folder)} on the source, which is not "
+                    f"present on the target -- creating it top-level instead"
+                )
+        elif parent_cidr:
             parent = self._view.subnets_by_cidr(section_id).get(parent_cidr)
             if parent:
                 extra["masterSubnetId"] = parent["id"]
@@ -382,6 +446,39 @@ class Executor:
         self._client.update_subnet(
             subnet_id, **model.to_subnet_write_fields(action.detail)
         )
+
+    def _do_create_folder(self, action):
+        """Creates one folder, under its parent folder if it has one.
+
+        Written through the subnets endpoint with isFolder=1, which is
+        what phpIPAM's own Folders controller is -- it is `class
+        Folders_controller extends Subnets_controller {}` and nothing
+        else. The name goes in `description`; posting isFolder=1 makes
+        phpIPAM discard `subnet` and `mask` itself.
+        """
+        section_id = self._section_id(action.section)
+        path = tuple(action.detail["path"])
+        parent_id = 0
+        if len(path) > 1:
+            parent = self._view.folders_by_path(section_id).get(path[:-1])
+            if not parent:
+                raise TargetError(
+                    f"cannot create folder {'/'.join(path)} -- its parent "
+                    f"folder {'/'.join(path[:-1])} is not present on the "
+                    f"target"
+                )
+            parent_id = parent["id"]
+
+        self._client.create_subnet(
+            subnet=None, mask=None, section_id=section_id,
+            description=path[-1], isFolder="1", masterSubnetId=parent_id,
+        )
+        self._view.invalidate_subnets(section_id)
+        if path not in self._view.folders_by_path(section_id):
+            raise TargetError(
+                f"created folder {'/'.join(path)} but it is not visible on "
+                f"re-read -- treating as a failed write"
+            )
 
     # -- L2 domains, VLANs and VRFs ------------------------------------
 
@@ -555,8 +652,20 @@ class Executor:
         section_id = self._section_id(action.section)
         subnet_id = self._subnet_id(action.section, action.cidr)
 
+        parent_folder = action.detail.get("parent_folder")
         parent_cidr = action.detail.get("master_subnet")
-        if parent_cidr:
+        if parent_folder:
+            folder = self._view.folders_by_path(section_id).get(
+                tuple(parent_folder))
+            if not folder:
+                self._log(
+                    f"  NOTE   {action.cidr} moved into folder "
+                    f"{'/'.join(parent_folder)} on the source, which is not "
+                    f"present on the target -- leaving it where it is"
+                )
+                return
+            new_parent_id = folder["id"]
+        elif parent_cidr:
             parent = self._view.subnets_by_cidr(section_id).get(parent_cidr)
             if not parent:
                 self._log(

@@ -72,7 +72,10 @@ for c in range(0, len(rows), 500):
           + ",".join(rows[c:c+500]) + ";")
 PY
 docker compose exec -T db1 mariadb -uroot -prootpw < "$WORK/seed.sql"
-check "source seeded" "$((SUBNETS + 4))" "$(sql1 'SELECT COUNT(*) FROM subnets WHERE sectionId=1;')"
+# isFolder=0: setup.sh also seeds folders in this section, and they are
+# not subnets.
+check "source seeded" "$((SUBNETS + 4))" \
+      "$(sql1 'SELECT COUNT(*) FROM subnets WHERE sectionId=1 AND isFolder=0;')"
 
 git init -q --bare "$WORK/mirror.git"
 git clone -q "$WORK/mirror.git" "$WORK/src"      # source side

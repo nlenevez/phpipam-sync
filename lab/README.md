@@ -12,7 +12,7 @@ cd lab
 ./setup.sh                                   # bring up + seed all three instances
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
-./verify.sh                                  # 1:1 -- 66 assertions
+./verify.sh                                  # 1:1 -- 75 assertions
 ./verify-fanin.sh                            # fan-in -- 22 assertions
 ./verify-catchup.sh                          # mirror outage -- 14 assertions
 docker compose down                          # destroy everything
@@ -178,6 +178,28 @@ phpIPAM will happily let the API build a hierarchy its own create path
 would have rejected. This tool only ever writes parents that the source
 already had, so it does not exploit that — but it is worth knowing before
 trusting `masterSubnetId` from any other writer.
+
+### 6. A folder is not a subnet, but lives in the same table
+
+```
+GET  sections/1/subnets/   ->  folders FIRST (`order by isFolder desc`),
+                               subnet "0.0.0.0", mask null, name in `description`
+GET  subnets/20/           ->  404 "No subnets found"     (20 is a folder)
+POST folders/ {"isFolder":"1","masterSubnetId":<a subnet>}
+                           ->  409 "Parent is not a folder"
+```
+
+Two consequences, both found by seeding folders into the lab:
+
+- The custom-field probe reads `subnets[0]` to learn which columns are
+  custom. Since phpIPAM sorts folders first and refuses to serve one from
+  the single-subnet endpoint, that probe started hitting a folder and
+  failing -- after which every unprefixed custom field on a record whose
+  values were all null was reported as dropped instead of replicated. The
+  data was still right; the *report* silently stopped being trustworthy.
+- Folders may only nest under folders, so a folder tree is created
+  shallowest-first and a subnet's parent is either a CIDR or a folder
+  path, never both.
 
 ### What the failure looked like, and why it was contained
 
