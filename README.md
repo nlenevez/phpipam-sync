@@ -65,7 +65,7 @@ reproducible rather than a claim:
 cd lab && ./setup.sh
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
-./verify.sh           # 1:1 replication        -- 75 assertions
+./verify.sh           # 1:1 replication        -- 82 assertions
 ./verify-fanin.sh     # many-to-one fan-in     -- 22 assertions
 ./verify-catchup.sh   # mirror-outage recovery -- 14 assertions
 docker compose down
@@ -73,7 +73,7 @@ docker compose down
 PHPIPAM_VERSION=v1.7.4 ./verify.sh          # or any published tag
 ```
 
-Plus **172 unit/integration tests** needing no network, phpIPAM, or
+Plus **189 unit/integration tests** needing no network, phpIPAM, or
 credentials. CI runs them on every push.
 
 ### What is not proven
@@ -596,9 +596,9 @@ a failing `token_command` reports its stderr, never its stdout.
 
 ## What real phpIPAM taught us
 
-Six bugs that no amount of testing against a fake would have caught,
+Seven bugs that no amount of testing against a fake would have caught,
 because the fake behaved the way phpIPAM's *documentation* implies. All
-six are documented with the exact requests and responses in
+seven are documented with the exact requests and responses in
 [`lab/README.md`](lab/README.md).
 
 1. **Empty collections are HTTP 404**, not an empty list. Broke exporting
@@ -620,6 +620,10 @@ six are documented with the exact requests and responses in
    `GET subnets/{id}/` on a folder answers `404`, and phpIPAM lists
    folders *first* — which quietly broke custom-field discovery, since it
    probes the first record it sees.
+7. **Deleting a folder deletes everything inside it**, reporting only
+   `Subnet deleted`. Deleting a VLAN or VRF does the opposite — the
+   subnets survive and their reference is nulled. So folders are only
+   ever removed once confirmed empty.
 
 The lesson generalises: the write path of a client built from
 documentation is unproven until it has run against the real server.
@@ -629,7 +633,7 @@ documentation is unproven until it has run against the real server.
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests -v          # 172 tests, no network
+python3 -m unittest discover -s tests -v          # 189 tests, no network
 ```
 
 The suite includes **deliberate negative controls** throughout — every

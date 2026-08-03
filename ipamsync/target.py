@@ -233,6 +233,54 @@ class TargetView:
             return None
         return self._load_l2()["vrf_name_by_id"].get(str(vrf_id))
 
+    def _section_list(self, raw, key="sections"):
+        return {
+            part.strip()
+            for part in str(raw.get(key) or "").split(";")
+            if part.strip()
+        }
+
+    def domains_owned_by(self, section_id):
+        """L2 domains scoped to this section and NO other.
+
+        Deletion candidates have to be limited to these. Domain 1
+        ("default") belongs to every section implicitly and its section
+        list is empty, and any domain serving several sections is shared
+        on a fan-in master -- deleting VLANs out of either would let one
+        subordinate remove another's, which is exactly what the
+        one-section-per-source rule exists to prevent.
+        """
+        owned = []
+        for raw in self._load_l2()["domains"].values():
+            if str(raw.get("id")) == "1":
+                continue
+            if self._section_list(raw) == {str(section_id)}:
+                owned.append(raw)
+        return owned
+
+    def vlans_in_domain(self, domain_name):
+        wanted = str(domain_name).strip().casefold()
+        return [raw for (domain, _number), raw
+                in self._load_l2()["vlans"].items() if domain == wanted]
+
+    def vrfs_owned_by(self, section_id):
+        """VRFs scoped to this section and no other -- same reasoning as
+        domains_owned_by. A VRF shared with another section is left
+        alone; removing it would take it away from that section too."""
+        return [raw for raw in self._load_l2()["vrfs"]
+                if self._section_list(raw) == {str(section_id)}]
+
+    def subnets_under(self, section_id, parent_id):
+        """Rows -- subnets or folders -- whose parent is this one.
+
+        Used before deleting a folder. phpIPAM deletes a folder's entire
+        contents with it, silently, so emptiness is confirmed first.
+        """
+        return [
+            raw for raw in self._client.get_subnets_in_section(section_id)
+            if str(raw.get("masterSubnetId") or "0") == str(parent_id)
+        ]
+
     def invalidate_l2(self):
         self._l2 = None
 
@@ -446,6 +494,56 @@ class Executor:
         self._client.update_subnet(
             subnet_id, **model.to_subnet_write_fields(action.detail)
         )
+
+    def _do_delete_folder(self, action):
+        """Deletes an orphaned folder, but only once it is empty.
+
+        phpIPAM deletes a folder's entire contents along with it -- child
+        folders, the subnets inside them and all their addresses --
+        reporting only "Subnet deleted". Confirmed on 1.8.1. Nothing in
+        the plan would show that blast radius, and the safety limit would
+        count it as one deletion, so emptiness is re-checked here against
+        the live instance rather than inferred from the plan.
+
+        A folder that still has contents is left for a later run: by then
+        its children have either been deleted in their own right or moved
+        out, and both are visible as their own actions.
+        """
+        section_id = self._section_id(action.section)
+        path = tuple(action.detail["path"])
+        folder = self._view.folders_by_path(section_id).get(path)
+        if not folder:
+            return  # already gone
+
+        remaining = self._view.subnets_under(section_id, folder["id"])
+        if remaining:
+            self._log(
+                f"  NOTE   folder {'/'.join(path)} is no longer in the "
+                f"snapshot but still holds {len(remaining)} record(s) on the "
+                f"target -- not deleting it, because phpIPAM would delete "
+                f"those too. They will be removed in their own right first."
+            )
+            return
+
+        self._client.delete_subnet(folder["id"])
+        self._view.invalidate_subnets(section_id)
+
+    def _do_delete_vlan(self, action):
+        vlan = self._view.vlan_by_key(action.detail["domain"],
+                                      action.detail["number"])
+        if not vlan:
+            return
+        # Safe to do while subnets still point at it: phpIPAM nulls their
+        # vlanId rather than deleting them. Confirmed on 1.8.1.
+        self._client.delete_vlan(vlan["id"])
+        self._view.invalidate_l2()
+
+    def _do_delete_vrf(self, action):
+        vrf = self._view.vrf_by_name(action.key, self._section_id(action.section))
+        if not vrf:
+            return
+        self._client.delete_vrf(vrf["id"])
+        self._view.invalidate_l2()
 
     def _do_create_folder(self, action):
         """Creates one folder, under its parent folder if it has one.

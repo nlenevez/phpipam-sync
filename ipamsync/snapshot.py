@@ -62,10 +62,28 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-#: Bumped only for a breaking change to the file layout or semantics.
-#: The importer refuses a snapshot it does not recognise rather than
-#: guessing at fields that may have changed meaning.
-SCHEMA_VERSION = 2
+#: Bumped for any change to the file layout or semantics that an older
+#: importer would misread. The importer refuses a snapshot it does not
+#: recognise rather than guessing at fields that may have changed
+#: meaning, so a mismatch pauses replication instead of corrupting it.
+#:
+#: Bump this whenever a key is ADDED as well as changed. An added key is
+#: not backward compatible in the direction that matters: an exporter
+#: that does not write it produces a snapshot in which a newer importer
+#: sees "no such records" rather than "this exporter did not say". That
+#: is the difference between doing nothing and reconciling to empty --
+#: and with strict mirror on, reconciling to empty means deleting.
+#:
+#:   1  original: sections, subnets, addresses
+#:   2  + `kind` on every document, `_section.json` per section holding
+#:      L2 domains, VLANs and VRFs, and vlan/vrf references on subnets
+#:   3  + `folders` in the section document and `parent_folder` on
+#:      subnets. Version 2 was briefly written both with and without
+#:      these; 3 exists so the two can never be confused, because a
+#:      folder-unaware snapshot read by a folder-aware importer looks
+#:      exactly like "every subnet is top-level and there are no
+#:      folders".
+SCHEMA_VERSION = 3
 
 MANIFEST_NAME = "manifest.json"
 SECTIONS_DIR = "sections"

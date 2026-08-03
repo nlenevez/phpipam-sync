@@ -112,9 +112,15 @@ WRITE_KINDS = (
     # "Deleting" in this module's docstring.
     "delete_address",
     "delete_subnet",
+    "delete_folder",
+    "delete_vlan",
+    "delete_vrf",
 )
 # Action kinds that are reported only and never executed.
-REPORT_KINDS = ("drift_subnet", "drift_address", "note")
+REPORT_KINDS = (
+    "drift_subnet", "drift_address", "drift_folder", "drift_vlan",
+    "drift_vrf", "note",
+)
 
 #: Deletions are always allowed up to this many records regardless of the
 #: fraction limit, so a small dataset is not permanently blocked by a
@@ -182,7 +188,8 @@ class Action:
             now = ("/".join(folder) if folder
                    else self.detail.get("master_subnet") or "top level")
             return f"{self.kind:16} {self.key}  [{was} -> {now}]"
-        if self.kind in ("drift_subnet", "drift_address", "note"):
+        if self.kind in ("drift_subnet", "drift_address", "drift_folder",
+                         "drift_vlan", "drift_vrf", "note"):
             return f"{self.kind:16} {self.key}  -- {self.detail.get('reason', '')}"
         return f"{self.kind:16} {self.key}"
 
@@ -280,6 +287,11 @@ def build_plan(documents, target, config):
     # subnets deepest-first) before being appended.
     orphan_addresses = []
     orphan_subnets = []
+    # Folders, VLANs and VRFs the target has and the snapshot does not.
+    # Kept apart from orphan_subnets because they are ordered after it --
+    # a folder cannot go until what it holds has gone.
+    orphan_l2 = []
+    orphan_folders = []
     detaches = []
 
     documents, section_docs = partition_documents(documents)
@@ -388,6 +400,64 @@ def build_plan(documents, target, config):
                 changed["number"] = number
                 actions.append(Action(
                     "update_vlan", key, changed, section=source_section,
+                ))
+
+        # -- Orphans: on the target, absent from this snapshot ---------
+        #
+        # Scoping is the whole difficulty here. Subnets are safe to
+        # reconcile because each source owns a section outright. VLANs
+        # and VRFs are not: an L2 domain can serve several sections, and
+        # domain 1 ("default") serves every section implicitly, so
+        # "delete what my snapshot does not list" would let one
+        # subordinate delete another's VLANs. Only objects scoped to
+        # THIS section and no other are ever candidates.
+        if section_id is not None:
+            snapshot_folders = {
+                tuple(path) for path in document.get("folders") or []
+            }
+            for path in sorted(existing_folders, key=lambda p: (-len(p), p)):
+                if path in snapshot_folders:
+                    continue
+                orphan_folders.append(Action(
+                    "delete_folder" if deleting else "drift_folder",
+                    "/".join(path),
+                    {"path": list(path), "reason": ORPHAN_REASON[deleting],
+                     "depth": len(path)},
+                    section=source_section,
+                ))
+
+            snapshot_vlans = {
+                (str(v.get("domain") or "").strip().casefold(),
+                 str(v.get("number") or ""))
+                for v in document.get("vlans") or []
+            }
+            for domain in target.domains_owned_by(section_id):
+                for raw in target.vlans_in_domain(domain.get("name")):
+                    key = (str(domain.get("name") or "").strip().casefold(),
+                           str(raw.get("number") or ""))
+                    if key in snapshot_vlans:
+                        continue
+                    orphan_l2.append(Action(
+                        "delete_vlan" if deleting else "drift_vlan",
+                        f"{domain.get('name')}/{raw.get('number')}",
+                        {"domain": domain.get("name"),
+                         "number": str(raw.get("number") or ""),
+                         "reason": ORPHAN_REASON[deleting]},
+                        section=source_section,
+                    ))
+
+            snapshot_vrfs = {
+                str(v.get("name") or "").strip().casefold()
+                for v in document.get("vrfs") or []
+            }
+            for raw in target.vrfs_owned_by(section_id):
+                if str(raw.get("name") or "").strip().casefold() in snapshot_vrfs:
+                    continue
+                orphan_l2.append(Action(
+                    "delete_vrf" if deleting else "drift_vrf",
+                    raw.get("name") or "",
+                    {"reason": ORPHAN_REASON[deleting]},
+                    section=source_section,
                 ))
 
         for vrf in document.get("vrfs") or []:
@@ -609,8 +679,9 @@ def build_plan(documents, target, config):
                                 if (a.section, a.cidr) not in doomed]
 
     if deleting:
-        _check_delete_limit(orphan_addresses, orphan_subnets, target,
-                            section_ids, config)
+        _check_delete_limit(orphan_addresses,
+                            orphan_subnets + orphan_folders + orphan_l2,
+                            target, section_ids, config)
 
     # Detaches run before every subnet create: phpIPAM validates overlap
     # against a new subnet's siblings, so a subnet being moved has to be
@@ -621,10 +692,17 @@ def build_plan(documents, target, config):
     actions = section_creates + detaches + remainder
 
     # Addresses first, then subnets deepest-first, so a parent is never
-    # removed while a child still points at it.
+    # removed while a child still points at it. Folders come after both,
+    # deepest-first as well: phpIPAM deletes a folder's entire contents
+    # along with it, so nothing may be left inside one when it goes.
+    # VLANs and VRFs are unordered -- deleting either merely nulls the
+    # reference on any subnet still pointing at it.
     actions.extend(orphan_addresses)
     actions.extend(sorted(orphan_subnets,
                           key=lambda a: -a.detail.get("prefixlen", 0)))
+    actions.extend(sorted(orphan_folders,
+                          key=lambda a: -a.detail.get("depth", 0)))
+    actions.extend(orphan_l2)
     return actions
 
 

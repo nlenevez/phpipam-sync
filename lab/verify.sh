@@ -405,6 +405,56 @@ grep -q "changes: none" "$WORK/delete2.log" \
     && pass "strict mirror is idempotent too" \
     || fail "second strict-mirror run was not a no-op: $(grep -E '^summary' "$WORK/delete2.log")"
 
+say "12b. strict mirror also removes folders, VLANs and VRFs"
+# Deletion of these is scoped far more tightly than subnets. A subnet is
+# safe to reconcile because each source owns its section outright; an L2
+# domain can serve several sections, and domain 1 ("default") serves
+# EVERY section implicitly. So only objects scoped to this one section
+# are ever candidates -- otherwise one subordinate would delete another's
+# VLANs on a fan-in master.
+
+# Records created only on the replica, in both kinds of domain. The one
+# in the shared default domain must survive; the one in this section's
+# own domain must not.
+DST_DOM=$(sql2 "SELECT id FROM vlanDomains WHERE name='Site-A';")
+sql2 "INSERT INTO vlans (domainId,name,number,description)
+      VALUES (1,'replica-only-shared',4001,'in the DEFAULT domain');" >/dev/null
+sql2 "INSERT INTO vlans (domainId,name,number,description)
+      VALUES ($DST_DOM,'replica-only-owned',4002,'in this section own domain');" >/dev/null
+
+# Deleted upstream: a VLAN, a VRF and an empty folder.
+sql1 "DELETE FROM vlans WHERE number=200;" >/dev/null
+sql1 "DELETE FROM vrf WHERE name='CUST-B';" >/dev/null
+sql1 "DELETE FROM subnets WHERE isFolder=1 AND description='Spare';" >/dev/null
+
+export_now >/dev/null 2>&1
+ship
+import_now --delete --apply > "$WORK/l2del.log" 2>&1
+
+check "VLAN deleted upstream is gone from the replica" "0" \
+      "$(sql2 "SELECT COUNT(*) FROM vlans WHERE number=200;")"
+check "VRF deleted upstream is gone from the replica" "0" \
+      "$(sql2 "SELECT COUNT(*) FROM vrf WHERE name='CUST-B';")"
+check "empty folder deleted upstream is gone from the replica" "0" \
+      "$(sql2 "SELECT COUNT(*) FROM subnets WHERE isFolder=1 AND description='Spare';")"
+
+# The safety rule, asserted against real phpIPAM rather than argued for.
+check "replica VLAN in the SHARED default domain survives" "1" \
+      "$(sql2 "SELECT COUNT(*) FROM vlans WHERE number=4001;")"
+check "replica VLAN in this section's OWN domain is removed" "0" \
+      "$(sql2 "SELECT COUNT(*) FROM vlans WHERE number=4002;")"
+
+# Deleting a VLAN must not take the subnets pointing at it: phpIPAM
+# nulls their vlanId instead.
+check "subnets survive their VLAN being deleted" \
+      "$(sql1 'SELECT COUNT(*) FROM subnets WHERE sectionId=1 AND isFolder=0;')" \
+      "$(sql2 'SELECT COUNT(*) FROM subnets WHERE isFolder=0;')"
+
+import_now --delete --apply > "$WORK/l2del2.log" 2>&1
+grep -q "changes: none" "$WORK/l2del2.log" \
+    && pass "l2 deletion is idempotent (no churn on the next run)" \
+    || fail "l2 deletion churns: $(grep -E '^applied' "$WORK/l2del2.log")"
+
 say "13. the delete safety limit refuses a mass deletion"
 # The limit is a FRACTION of the in-scope records, with a small absolute
 # floor so tiny datasets are not permanently blocked. The seed data alone

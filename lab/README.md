@@ -12,7 +12,7 @@ cd lab
 ./setup.sh                                   # bring up + seed all three instances
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
-./verify.sh                                  # 1:1 -- 75 assertions
+./verify.sh                                  # 1:1 -- 82 assertions
 ./verify-fanin.sh                            # fan-in -- 22 assertions
 ./verify-catchup.sh                          # mirror outage -- 14 assertions
 docker compose down                          # destroy everything
@@ -200,6 +200,28 @@ Two consequences, both found by seeding folders into the lab:
 - Folders may only nest under folders, so a folder tree is created
   shallowest-first and a subnet's parent is either a CIDR or a folder
   path, never both.
+
+### 7. Deleting a folder deletes everything inside it
+
+```
+DELETE folders/900/   ->  200 "Subnet deleted"
+```
+
+...and the child folder, the subnets under it and all their addresses
+are gone too, with nothing in the response to say so. Compare VLANs and
+VRFs, which are the opposite:
+
+```
+DELETE vlans/300/  ->  200, and every subnet's vlanId is set to NULL
+DELETE vrfs/60/    ->  200, and every subnet's vrfId  is set to NULL
+                       -- the subnets themselves survive
+```
+
+So the two need opposite handling. A VLAN or VRF can be deleted whenever
+it is orphaned. A folder cannot: the importer re-reads it first and
+refuses to delete one that still holds records, because a single planned
+deletion would otherwise destroy an unbounded number of unplanned ones —
+and count as one against the safety limit while doing it.
 
 ### What the failure looked like, and why it was contained
 

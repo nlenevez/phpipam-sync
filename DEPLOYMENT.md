@@ -25,11 +25,12 @@ the checks there are how you find out cheaply.
 4. [Part 3 — first load](#part-3--first-load)
 5. [Part 4 — automate](#part-4--automate)
 6. [Part 5 — switching to strict mirror](#part-5--switching-to-strict-mirror-later)
-7. [Monitoring](#monitoring)
-8. [When the mirror fails and then catches up](#when-the-mirror-fails-and-then-catches-up)
-9. [Repository growth and maintenance](#repository-growth-and-maintenance)
-10. [Runbook](#runbook)
-11. [Checklists](#checklists)
+7. [Upgrading across a schema change](#upgrading-across-a-schema-change)
+8. [Monitoring](#monitoring)
+9. [When the mirror fails and then catches up](#when-the-mirror-fails-and-then-catches-up)
+10. [Repository growth and maintenance](#repository-growth-and-maintenance)
+11. [Runbook](#runbook)
+12. [Checklists](#checklists)
 
 ---
 
@@ -577,6 +578,38 @@ additive. Then set `delete_drift: true` in the config.
 Strict mirror also **enforces the read-only intent**: anything created by
 hand on the master is removed on the next sync.
 
+**What deletion covers, and what it deliberately does not.** Subnets,
+addresses, folders, VLANs and VRFs are all reconciled. But VLANs and VRFs
+are scoped far more tightly than subnets, because they are not owned by a
+section the way a subnet is:
+
+| Object | Deleted when absent from the snapshot? |
+|---|---|
+| Subnet, address | Yes — the section is owned outright by one source |
+| Folder | Yes, but only once **empty** (see below) |
+| VLAN in a domain scoped to this section alone | Yes |
+| VLAN in the `default` domain | **Never** — domain 1 is implicitly in every section |
+| VLAN in a domain shared by several sections | **Never** |
+| VRF scoped to this section alone | Yes |
+| VRF shared with another section | **Never** — removing it would take it from that section too |
+| L2 domain itself | Never — they are containers, and shared by nature |
+
+The "never" rows are what keep a fan-in master safe. Anything looser
+would let one subordinate delete another subordinate's VLANs, which is
+the same failure the one-section-per-source rule exists to prevent. The
+practical consequence: **put each site's VLANs in that site's own L2
+domain**, or they will accumulate on the master and never be cleaned up.
+Anything left in the default domain is reported as drift but never
+removed.
+
+**Folders are only deleted once empty.** phpIPAM deletes a folder's
+entire contents along with it — child folders, the subnets inside them
+and all their addresses — reporting only `Subnet deleted`. Confirmed on
+1.8.1. The importer therefore re-reads each folder before removing it and
+skips any that still holds records, leaving it for a later run once its
+contents have gone in their own right. That keeps the blast radius of a
+single deletion visible in the plan instead of hidden behind one line.
+
 A run that would delete more than `delete_limit_fraction` (default 10%)
 of the in-scope records is refused outright, writing nothing:
 
@@ -874,20 +907,9 @@ mapped to the same master section. Give each its own via `section_map`.
 Never work around this.
 
 **`Snapshot schema_version is N, this importer understands M`** — the two
-sides are on different releases of this tool. The importer refuses rather
-than guessing, because a format it does not understand may describe
-records it would otherwise write wrongly.
-
-**Upgrade the master first, then the subordinates.** A newer importer
-still reads an older snapshot only if the version matches exactly, so the
-practical sequence is: upgrade the master, upgrade one subordinate, let
-it export, confirm the master applies it, then do the rest. The mirror
-keeps delivering throughout — the snapshot in the repo is simply not
-applied until the versions line up, and nothing is lost, because the
-importer reads the tree at `HEAD` rather than replaying history.
-
-Version 2 added L2 domains, VLANs and VRFs (the `_section.json` file in
-each section directory) and tagged every document with a `kind`.
+sides are on different releases of this tool. This is expected during an
+upgrade and is not an error to work around; see
+[Upgrading](#upgrading-across-a-schema-change).
 
 **`Checksum mismatch for ...`** — the snapshot was modified after export
 or arrived corrupt. Re-run the export at that site and let the mirror

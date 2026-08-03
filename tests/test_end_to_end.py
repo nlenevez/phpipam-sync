@@ -69,6 +69,7 @@ class FakePhpIpam:
         # allocate the same id -- the same reason the lab pushes
         # instance 2's auto-increment forward.
         self._next_id = first_id
+        self._next_domain_id = 40
         self.write_calls = []
         # Custom-field column names, as phpIPAM would have them: plain
         # extra columns whose names the admin chose.
@@ -149,7 +150,14 @@ class FakePhpIpam:
         return vlan["id"]
 
     def add_l2domain(self, name, sections=None, domain_id=None):
-        domain = {"id": str(domain_id or self._new_id()), "name": name,
+        # Domains get their own id space. phpIPAM has one table per
+        # object type, and sharing the counter here collided with the
+        # hard-coded id 1 of the default domain -- which made the first
+        # domain a test ever created indistinguishable from it.
+        if domain_id is None:
+            self._next_domain_id += 1
+            domain_id = self._next_domain_id
+        domain = {"id": str(domain_id), "name": name,
                   "description": "",
                   "sections": ";".join(str(s) for s in (sections or []))}
         self.l2domains.append(domain)

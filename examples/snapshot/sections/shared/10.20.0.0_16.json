@@ -20,7 +20,7 @@
   "kind": "subnet",
   "master_subnet": null,
   "parent_folder": null,
-  "schema_version": 2,
+  "schema_version": 3,
   "section": "Shared",
   "vlan": null,
   "vrf": null

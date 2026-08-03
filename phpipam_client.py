@@ -412,6 +412,9 @@ class PhpIpamClient:
     def update_vlan(self, vlan_id, **fields):
         return self._request("PATCH", f"vlans/{vlan_id}/", json_body=fields)
 
+    def delete_vlan(self, vlan_id):
+        return self._request("DELETE", f"vlans/{vlan_id}/")
+
     def get_vrfs(self):
         return self._request("GET", "vrfs/") or []
 
@@ -426,6 +429,9 @@ class PhpIpamClient:
         if sections is not None:
             payload["sections"] = ";".join(str(one) for one in sections)
         return self._request("POST", "vrfs/", json_body=payload)
+
+    def delete_vrf(self, vrf_id):
+        return self._request("DELETE", f"vrfs/{vrf_id}/")
 
     def update_vrf(self, vrf_id, *, sections=None, **fields):
         payload = dict(fields)

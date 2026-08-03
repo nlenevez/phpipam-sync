@@ -45,6 +45,32 @@ class FakeTarget:
     def addresses_by_ip(self, subnet_id):
         return self._addresses.get(subnet_id, {})
 
+    def domains_owned_by(self, section_id):
+        owned = []
+        for raw in self._domains.values():
+            if str(raw.get("id")) == "1":
+                continue
+            listed = {p for p in str(raw.get("sections") or "").split(";") if p}
+            if listed == {str(section_id)}:
+                owned.append(raw)
+        return owned
+
+    def vlans_in_domain(self, domain_name):
+        wanted = str(domain_name).strip().casefold()
+        return [raw for (domain, _n), raw in self._vlans.items()
+                if domain == wanted]
+
+    def vrfs_owned_by(self, section_id):
+        out = []
+        for raw in self._vrfs.values():
+            listed = {p for p in str(raw.get("sections") or "").split(";") if p}
+            if listed == {str(section_id)}:
+                out.append(raw)
+        return out
+
+    def subnets_under(self, section_id, parent_id):
+        return []
+
     def folders_by_path(self, section_id):
         return self._folders.get(section_id, {})
 
@@ -492,3 +518,99 @@ class TestSummarise(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def section_doc(section="Shared", folders=(), vlans=(), vrfs=(), domains=()):
+    from ipamsync.snapshot import build_section_document
+    return build_section_document(
+        section_name=section, domains=list(domains), vlans=list(vlans),
+        vrfs=list(vrfs), folders=folders,
+    )
+
+
+class TestDeletingL2Objects(unittest.TestCase):
+    """Deletion of folders, VLANs and VRFs.
+
+    The scoping rules here are the whole point. Subnets are safe to
+    reconcile because each source owns a section outright; VLANs and VRFs
+    are not, because an L2 domain can serve several sections and domain 1
+    serves every section implicitly. A rule of "delete what my snapshot
+    does not list" would let one subordinate delete another's.
+    """
+
+    def setUp(self):
+        self.sections = {"Shared": {"id": 3}}
+
+    def _target(self, **kwargs):
+        return FakeTarget(sections=self.sections, subnets={3: {}},
+                          addresses={}, **kwargs)
+
+    def test_a_vlan_in_the_shared_default_domain_is_never_touched(self):
+        """Domain 1 belongs to every section, so another site's VLANs
+        live there too. This is the assertion that stops a fan-in master
+        eating itself."""
+        target = self._target(
+            domains={"default": {"id": "1", "name": "default", "sections": ""}},
+            vlans={("default", "100"): {"id": 70, "number": "100"}},
+        )
+        actions = build_plan([section_doc()], target, config(delete_drift=True))
+        self.assertEqual(kinds(actions), [])
+
+    def test_a_vlan_in_a_domain_this_section_owns_is_deleted(self):
+        target = self._target(
+            domains={"site-a": {"id": "9", "name": "Site-A", "sections": "3"}},
+            vlans={("site-a", "200"): {"id": 71, "number": "200"}},
+        )
+        actions = build_plan([section_doc()], target, config(delete_drift=True))
+        self.assertEqual(kinds(actions), ["delete_vlan"])
+
+    def test_a_vlan_in_a_domain_shared_with_another_section_is_left_alone(self):
+        target = self._target(
+            domains={"shared": {"id": "9", "name": "Shared-Dom",
+                                "sections": "3;7"}},
+            vlans={("shared-dom", "200"): {"id": 71, "number": "200"}},
+        )
+        actions = build_plan([section_doc()], target, config(delete_drift=True))
+        self.assertEqual(kinds(actions), [])
+
+    def test_a_vrf_shared_with_another_section_is_left_alone(self):
+        target = self._target(
+            vrfs={"core": {"id": 5, "name": "CORE", "sections": "3;7"}},
+        )
+        actions = build_plan([section_doc()], target, config(delete_drift=True))
+        self.assertEqual(kinds(actions), [])
+
+    def test_a_vrf_scoped_to_this_section_alone_is_deleted(self):
+        target = self._target(
+            vrfs={"core": {"id": 5, "name": "CORE", "sections": "3"}},
+        )
+        actions = build_plan([section_doc()], target, config(delete_drift=True))
+        self.assertEqual(kinds(actions), ["delete_vrf"])
+
+    def test_orphan_folders_are_deleted_deepest_first(self):
+        target = self._target(folders={3: {
+            ("Datacentre",): {"id": 40},
+            ("Datacentre", "Rack A"): {"id": 41},
+        }})
+        actions = build_plan([section_doc()], target, config(delete_drift=True))
+        self.assertEqual(kinds(actions), ["delete_folder", "delete_folder"])
+        self.assertEqual([a.key for a in actions],
+                         ["Datacentre/Rack A", "Datacentre"])
+
+    def test_additive_mode_reports_but_never_deletes(self):
+        target = self._target(
+            folders={3: {("Gone",): {"id": 40}}},
+            domains={"site-a": {"id": "9", "name": "Site-A", "sections": "3"}},
+            vlans={("site-a", "200"): {"id": 71, "number": "200"}},
+            vrfs={"core": {"id": 5, "name": "CORE", "sections": "3"}},
+        )
+        actions = build_plan([section_doc()], target, config())
+        self.assertEqual(sorted(kinds(actions)),
+                         ["drift_folder", "drift_vlan", "drift_vrf"])
+        self.assertEqual([a for a in actions if a.is_write], [])
+
+    def test_a_folder_still_in_the_snapshot_is_kept(self):
+        target = self._target(folders={3: {("Keep",): {"id": 40}}})
+        actions = build_plan([section_doc(folders=[["Keep"]])], target,
+                             config(delete_drift=True))
+        self.assertEqual(kinds(actions), [])
