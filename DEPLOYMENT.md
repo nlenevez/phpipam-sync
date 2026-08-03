@@ -37,7 +37,11 @@ the checks there are how you find out cheaply.
 
 **Requirements on every host running the tool**
 
-- Python 3.9+, `requests`, `PyYAML` (`pip install -r requirements.txt`)
+- Python 3.9+, `requests`, `PyYAML` (`pip install -r requirements.txt`).
+  Check the interpreter cron will actually use, not just your shell's —
+  see Part 4. The tool refuses to start on anything older, by design:
+  under 3.6 an export otherwise completed its whole read and then died in
+  the git plumbing with an unrelated-looking `TypeError`.
 - `git`, with the mirrored repo already cloned locally
 - **HTTPS to the phpIPAM instance.** Not optional: phpIPAM refuses
   app-code API authentication over plain HTTP with
@@ -198,6 +202,26 @@ The tool refuses to start if two sources target the same section, so you
 cannot get this wrong silently — but understand why before overriding
 anything.
 
+**Turn OFF "strict mode" on each replicated section.** It is on by
+default. Strict mode makes phpIPAM validate every *created* subnet
+against its siblings and refuse overlaps, which blocks one ordinary
+upstream change: adding an aggregate above subnets that already exist at
+the same level. The importer reorders what it can (see "Re-parenting" in
+`ipamsync/plan.py`), but when the new aggregate would sit above
+*top-level* subnets there is nowhere to move them to first, and the
+create fails with `409 ... overlaps with ...`.
+
+Turning it off is safe for a section that only this tool writes to: the
+hierarchy being written is one the source instance already validated
+under its own strict mode. Confirmed on 1.8.1 — the same create returns
+`409` with strict mode on and `201` with it off. It is per-section, so
+sections you manage by hand keep their checks.
+
+It also matters once VRFs are in play: phpIPAM's overlap check is
+VRF-aware, so subnets that legitimately overlap in different VRFs
+upstream will be refused on the master during any window where the VRF
+assignment has not yet been replicated.
+
 Set each section's permissions to **read** for your user groups now (see
 2.5).
 
@@ -265,6 +289,127 @@ Two things to know:
 The importer never touches `permissions`, so whatever you set survives.
 
 You will still need write access yourself to action the drift report.
+
+### 2.5b Read-only to administrators as well (optional)
+
+Step 2.5 stops at non-admin users, and that is not a configuration
+oversight — it is the ceiling of what phpIPAM can express. Both
+permission checks open with a hard-coded bypass:
+
+```php
+// functions/classes/class.Sections.php:456, class.Subnets.php:3025
+# if user is admin then return 3, otherwise check
+if($user->role == "Administrator")	{ return 3; }
+```
+
+Level 3 is read/write/admin, returned before any lookup of the section's
+or subnet's own permissions. phpIPAM has no lock flag, no immutable
+state, and no per-subnet override that an administrator does not
+outrank. **If you need replicated data to be read-only to admins too,
+that has to be enforced underneath phpIPAM, in the database.**
+
+That forces one structural decision. The importer writes through the
+same phpIPAM code an administrator uses, so the database has to be able
+to tell them apart — which means two MySQL users, which means two
+phpIPAM configurations sharing one database:
+
+| | reached by | MySQL user | rights |
+|---|---|---|---|
+| **Private instance** | the importer only — bind to localhost or a management VLAN | `ipam_sync` | full DML |
+| **Public instance** | people | `ipam_ro` | restricted, below |
+
+Both are the same phpIPAM release pointed at the same schema; only
+`config.php` differs. The importer's API app lives on the private one.
+
+#### Option A — table grants (whole master read-only)
+
+If the master holds nothing but replicated data — the normal case for
+this topology — this is the smallest thing that actually works:
+
+```sql
+CREATE USER 'ipam_ro'@'%' IDENTIFIED BY '...';
+GRANT SELECT ON phpipam.* TO 'ipam_ro'@'%';
+-- housekeeping phpIPAM still needs in order to function
+GRANT INSERT, UPDATE, DELETE ON phpipam.php_sessions  TO 'ipam_ro'@'%';  -- if DB sessions are on
+GRANT INSERT                 ON phpipam.logs          TO 'ipam_ro'@'%';
+GRANT INSERT, UPDATE, DELETE ON phpipam.loginAttempts TO 'ipam_ro'@'%';
+GRANT UPDATE (lastLogin)     ON phpipam.users         TO 'ipam_ro'@'%';
+```
+
+`subnets`, `ipaddresses`, `sections`, `vlans` and `vrf` get no write
+grant, so an administrator editing a replicated subnet gets a database
+error instead of a saved change.
+
+Include the column-level `lastLogin` grant. Without it every login
+paints a red banner: `update_login_time()` catches the failure rather
+than dying, but it does surface it.
+
+#### Option B — triggers (per-section granularity)
+
+Only needed if the master must also carry locally-editable sections,
+since grants cannot distinguish one section's rows from another's:
+
+```sql
+DELIMITER //
+CREATE TRIGGER subnets_ro BEFORE UPDATE ON subnets FOR EACH ROW
+BEGIN
+  DECLARE msg VARCHAR(255);
+  IF OLD.sectionId IN (SELECT id FROM sections WHERE name LIKE 'Site-%')
+     AND SESSION_USER() NOT LIKE 'ipam\_sync@%' THEN
+    SET msg = 'replicated subnet: read-only, edit it at the source';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+  END IF;
+END//
+DELIMITER ;
+```
+
+Two details that will cost you an afternoon otherwise, both confirmed
+against MySQL 8:
+
+- **The bypass must test `SESSION_USER()`, not `CURRENT_USER()`.**
+  Triggers execute as their definer, so inside one `CURRENT_USER()`
+  reports `root@localhost` no matter who connected, and the exemption
+  silently never matches. `SESSION_USER()` reports the account that
+  actually opened the connection.
+- **`SIGNAL ... SET MESSAGE_TEXT` will not take an expression.** Build
+  the message into a declared variable first; `CONCAT(...)` inline is a
+  syntax error.
+
+You need this on `subnets` and `ipaddresses`, for INSERT and DELETE as
+well as UPDATE.
+
+#### What this buys, and what it does not
+
+It makes changing replicated data **deliberate rather than possible**.
+Anyone holding MySQL credentials can drop a trigger or re-grant, and
+nothing here changes that. What it removes is the accidental case: no
+one edits mirrored data by clicking around in the UI and wondering later
+why the next import reverted it.
+
+Costs worth weighing before you take this on:
+
+- Failures surface as raw database errors, not a civil "this is
+  read-only" message.
+- phpIPAM upgrades run DDL. Run them against the private instance, as
+  the privileged user.
+- Managing custom fields does `ALTER TABLE`, so administrators lose that
+  on the public instance. Arguably correct — fields have to match the
+  source anyway (step 2.2) — but it is a real change to how you work.
+
+**Recommendation.** If the master is purely replicated, take Option A
+and simply do not hand out Administrator on the public instance
+day-to-day; keep one break-glass account. That needs no triggers to
+maintain, and the grants mean even the break-glass account cannot
+quietly edit subnet data. Reach for Option B only when the master has to
+hold local sections alongside mirrored ones.
+
+**Verification status.** The phpIPAM behaviour above is quoted from
+1.8.1's source, and the two MySQL gotchas were reproduced on MySQL 8.
+The arrangement as a whole has **not** been exercised in the lab — the
+lab runs a single instance per database, so the two-config split is
+described here as a design, not as something demonstrated end to end.
+Treat the grant list as the starting point for your own test rather than
+a finished recipe, and prove it on a copy before you rely on it.
 
 ### 2.6 Configure
 
@@ -348,7 +493,8 @@ rewritten on every run, which would churn the master's history forever.
 
 ```cron
 */5 * * * * ipamsync /usr/bin/flock -n /var/lock/ipam-export.lock \
-  /opt/phpipam-sync/ipam_export.py --config /opt/phpipam-sync/config.yml \
+  /usr/bin/python3.12 /opt/phpipam-sync/ipam_export.py \
+  --config /opt/phpipam-sync/config.yml \
   --out-dir /srv/ipam-data --commit --push >> /var/log/ipam-export.log 2>&1
 ```
 
@@ -356,11 +502,18 @@ Export is read-only against phpIPAM and commits only when something
 actually changed, so a 5-minute interval does not fill the repo with
 empty commits.
 
+**Name the interpreter by absolute path**, as above, rather than relying
+on the `#!/usr/bin/env python3` shebang. cron's PATH is not your login
+shell's, and a host that has 3.12 installed can still resolve `python3`
+to something older — on which this tool refuses to start. Substitute the
+real path from `command -v python3.12` on that host.
+
 ### On the master
 
 ```cron
 */10 * * * * ipamsync /usr/bin/flock -n /var/lock/ipam-import.lock \
-  /opt/phpipam-sync/ipam_import.py --config /opt/phpipam-sync/config.master.yml \
+  /usr/bin/python3.12 /opt/phpipam-sync/ipam_import.py \
+  --config /opt/phpipam-sync/config.master.yml \
   --pull --apply --quiet-drift >> /var/log/ipam-import.log 2>&1
 ```
 
@@ -660,6 +813,45 @@ phpIPAM settings.
 HTTPS. Behind a proxy, set `IPAM_TRUST_X_FORWARDED=true` and forward
 `X-Forwarded-Proto`.
 
+**`415 "Invalid Content type <value>"`** — phpIPAM refused the request
+content type. It accepts `application/json`, `application/xml`,
+`application/x-www-form-urlencoded`, an absent header, and an empty one;
+everything else is refused. This tool sends `application/json` on every
+request, so seeing this means something between it and phpIPAM is
+supplying or rewriting the header — nginx, `fastcgi_param CONTENT_TYPE`,
+a reverse proxy, or a WAF.
+
+The message ends with the offending value, so read it first. **If it
+looks like it has nothing after it, that is itself the clue**: a
+whitespace-only value prints that way, and so does an empty one on
+phpIPAM ≤ 1.7.x (see below). Find what is arriving by logging it in
+nginx —
+
+```nginx
+log_format ct '$remote_addr "$request" $status ct="$http_content_type"';
+access_log /var/log/nginx/ct.log ct;
+```
+
+— and check for anything setting it:
+`grep -rniE 'content.type|fastcgi_param CONTENT_TYPE' /etc/nginx/`.
+
+Confirm the fix end to end from the phpIPAM host itself, which also
+takes any outbound proxy out of the picture:
+
+```bash
+curl -sk -H "token: $TOKEN" https://127.0.0.1/api/<app_id>/sections/ | head -c 200
+curl -sk -H "token: $TOKEN" -H 'Content-Type: application/json' \
+     https://127.0.0.1/api/<app_id>/sections/ | head -c 200
+```
+
+**On phpIPAM ≤ 1.7.x specifically**, an *empty* value is refused too, on
+PHP 8 only: the check reads `strlen(@$ct==0)` — the `==0` inside
+`strlen()` — fixed to `strlen(@$ct)==0` in 1.8.1. On PHP 7 that evaluates
+`strlen(true)` → 1, so the branch always fired and the check passed
+everything; PHP 8 made `"" == 0` false, so it starts enforcing. Those
+versions break on a **PHP** upgrade, not a phpIPAM one. Upgrading phpIPAM
+to 1.8.1+ fixes that half at the source.
+
 **`401 ... invalid permissions`** — app permission too low. Source needs
 Read; master needs Read/Write.
 
@@ -681,6 +873,22 @@ non-admins.
 mapped to the same master section. Give each its own via `section_map`.
 Never work around this.
 
+**`Snapshot schema_version is N, this importer understands M`** — the two
+sides are on different releases of this tool. The importer refuses rather
+than guessing, because a format it does not understand may describe
+records it would otherwise write wrongly.
+
+**Upgrade the master first, then the subordinates.** A newer importer
+still reads an older snapshot only if the version matches exactly, so the
+practical sequence is: upgrade the master, upgrade one subordinate, let
+it export, confirm the master applies it, then do the rest. The mirror
+keeps delivering throughout — the snapshot in the repo is simply not
+applied until the versions line up, and nothing is lost, because the
+importer reads the tree at `HEAD` rather than replaying history.
+
+Version 2 added L2 domains, VLANs and VRFs (the `_section.json` file in
+each section directory) and tagged every document with a `kind`.
+
 **`Checksum mismatch for ...`** — the snapshot was modified after export
 or arrived corrupt. Re-run the export at that site and let the mirror
 resend. Nothing is imported from a snapshot that fails verification.
@@ -694,6 +902,14 @@ remote.
 **Every run rewrites the same records** — most likely custom-field
 nesting is enabled on one side and not the other. Both API apps need
 "Nest custom fields" set the same way.
+
+**`phpipam-sync requires Python 3.9 or newer`** — the interpreter that
+actually ran the script is too old. Note *where* this comes from: the
+host may well have a new enough Python installed and still resolve
+`python3` to an older one, which is why the cron entries above name the
+interpreter by absolute path instead of relying on the shebang. Check
+with `sudo -u ipamsync env -i /bin/sh -c 'command -v python3'` rather
+than from your own shell, whose PATH is not the one cron uses.
 
 ---
 

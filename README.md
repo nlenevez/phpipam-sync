@@ -65,15 +65,15 @@ reproducible rather than a claim:
 cd lab && ./setup.sh
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
-./verify.sh           # 1:1 replication        -- 47 assertions
-./verify-fanin.sh     # many-to-one fan-in     -- 23 assertions
-./verify-catchup.sh   # mirror-outage recovery -- 15 assertions
+./verify.sh           # 1:1 replication        -- 66 assertions
+./verify-fanin.sh     # many-to-one fan-in     -- 22 assertions
+./verify-catchup.sh   # mirror-outage recovery -- 14 assertions
 docker compose down
 
 PHPIPAM_VERSION=v1.7.4 ./verify.sh          # or any published tag
 ```
 
-Plus **159 unit/integration tests** needing no network, phpIPAM, or
+Plus **165 unit/integration tests** needing no network, phpIPAM, or
 credentials. CI runs them on every push.
 
 ### What is not proven
@@ -91,7 +91,7 @@ instances:
 4. Only then wire it into cron.
 
 Not covered: instances with custom `ipTags` (see `options.sync_tags`),
-VRFs, and phpIPAM's permissions model beyond what is described below.
+and phpIPAM's permissions model beyond what is described below.
 
 ---
 
@@ -177,11 +177,25 @@ every address inside them (hostname, description, MAC, owner, note, port,
 gateway flag, ping/PTR flags) — plus **custom fields** on both. IPv4 and
 IPv6 alike.
 
-**Not replicated:** VLANs, VRFs, devices, locations, nameservers,
-permissions, customers — separate master data with their own ids. Where a
-source subnet has a VLAN, the snapshot records its number and the
-importer prints a note, so the omission is visible rather than
-mysterious.
+**Also replicated: L2 domains, VLANs and VRFs**, and each subnet's link
+to them. These are carried as records in their own right, so a VLAN or
+VRF defined upstream but attached to nothing still appears on the target
+— defining one is a deliberate act at the source, and a one-way link
+gives the target no way to ask for it later. Their natural keys are a
+domain by **name**, a VLAN by **(domain, number)**, and a VRF by
+**(section, name)**; phpIPAM has no unique index on any of them, so the
+same VLAN number in two domains, or the same VRF name in two sections,
+are genuinely separate records. That is what keeps fan-in safe.
+
+Scoping follows phpIPAM's own rule rather than anything this tool
+invents: a VLAN belongs to a section through its L2 domain
+(`vlanDomains.permissions`, which holds *section ids* despite the name),
+and a VRF through its own `sections` list. Both lists are only ever
+added to on the target, never replaced, so one subordinate's import
+cannot evict another's.
+
+**Not replicated:** devices, locations, nameservers, permissions,
+customers — separate master data with their own ids.
 
 **Deletions are not replicated by default** — see
 [Strict mirror and drift](#strict-mirror-and-drift).
@@ -281,7 +295,11 @@ two sources reading the same directory.
 
 ## Usage
 
-Requires Python 3.9+, `requests` and `PyYAML` on both hosts. Full
+Requires Python 3.9+, `requests` and `PyYAML` on both hosts — the tool
+checks the version at startup and refuses to run on anything older, so
+that an unsupported interpreter fails immediately instead of part-way
+through a run. Under cron, name the interpreter by absolute path rather
+than relying on the shebang; cron's PATH is not your shell's. Full
 procedure in [DEPLOYMENT.md](DEPLOYMENT.md); the essentials:
 
 ```bash
@@ -559,6 +577,12 @@ What that means in practice:
   `Read/Write`. Additive-only mode (the default) keeps the worst case at
   "wrong records added or updated" rather than "records destroyed"; see
   [Strict mirror and drift](#strict-mirror-and-drift).
+- **"Read-only master" means read-only to users, not to admins.**
+  phpIPAM grants an Administrator read/write/admin on every section
+  before it consults any permission, so no setting inside phpIPAM makes
+  mirrored data read-only to one. Enforcing that needs database grants
+  and a second phpIPAM configuration — see DEPLOYMENT.md § 2.5b, which
+  weighs whether it is worth it.
 
 Tokens are never read from the config file itself, are passed as headers
 rather than on the command line, and are kept out of error messages —
@@ -568,9 +592,9 @@ a failing `token_command` reports its stderr, never its stdout.
 
 ## What real phpIPAM taught us
 
-Four bugs that no amount of testing against a fake would have caught,
+Five bugs that no amount of testing against a fake would have caught,
 because the fake behaved the way phpIPAM's *documentation* implies. All
-four are documented with the exact requests and responses in
+five are documented with the exact requests and responses in
 [`lab/README.md`](lab/README.md).
 
 1. **Empty collections are HTTP 404**, not an empty list. Broke exporting
@@ -583,6 +607,11 @@ four are documented with the exact requests and responses in
    them nested, so every run rewrote every custom field forever. Nothing
    was wrong in the data, which is exactly why it would have survived a
    casual look.
+5. **Overlap is validated on create but not on update.** A new subnet
+   that overlaps a sibling is refused with `409`, while `PATCH
+   masterSubnetId` accepts anything — so inserting an intermediate
+   aggregate upstream could not be applied naively, and re-parenting has
+   to detach before it creates.
 
 The lesson generalises: the write path of a client built from
 documentation is unproven until it has run against the real server.
@@ -592,7 +621,7 @@ documentation is unproven until it has run against the real server.
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests -v          # 159 tests, no network
+python3 -m unittest discover -s tests -v          # 165 tests, no network
 ```
 
 The suite includes **deliberate negative controls** throughout — every

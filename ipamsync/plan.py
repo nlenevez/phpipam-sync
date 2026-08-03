@@ -46,6 +46,32 @@ guard it, because this is the one operation here that can destroy data:
 Deletion order is addresses first, then subnets deepest-first, so a
 parent is never removed while a child still points at it.
 
+## Re-parenting
+
+`masterSubnetId` is a local id and is excluded from the replicated field
+set, so a subnet moved under a different parent upstream is invisible to
+the field comparison -- every field still matches while the two sides
+diverge structurally. Parents are therefore compared separately, as
+CIDRs, and a change emits its own `reparent_subnet` action.
+
+Ordering matters here in a way it does not elsewhere, because phpIPAM
+validates a new subnet against its siblings and refuses one that
+overlaps them (confirmed on 1.8.1: `409 Subnet overlaps with ...`). The
+ordinary case of "someone inserted an intermediate aggregate upstream"
+therefore cannot be applied naively: a new 10.20.4.0/22 cannot be created
+under 10.20.0.0/16 while 10.20.5.0/24 is still a sibling under that /16.
+
+So every re-parent is planned as a pair -- `detach_subnet`, which moves
+the subnet to the top of its section, and `reparent_subnet`, which puts
+it where the snapshot says -- and *all* detaches are ordered before *any*
+create. PATCH is not overlap-validated (only create is), so the detach
+itself always succeeds.
+
+One case remains impossible and is reported rather than retried: a new
+aggregate that sits above subnets which are already top-level. There is
+nowhere to move them to, since top-level subnets are siblings of each
+other, and phpIPAM will not create the aggregate over them.
+
 ## Matching is by natural key, always
 
 Subnets match on (target section, canonical CIDR); addresses match on
@@ -56,13 +82,27 @@ ipamsync.model for why.
 import ipaddress
 
 from ipamsync import model
-from ipamsync.snapshot import canonical_cidr
+from ipamsync.snapshot import canonical_cidr, partition_documents
 
 # Action kinds that change the target.
 WRITE_KINDS = (
     "create_section",
     "create_subnet",
     "update_subnet",
+    # Always paired with, and ordered before, the reparent that follows
+    # it -- see "Re-parenting" in this module's docstring.
+    "detach_subnet",
+    "reparent_subnet",
+    # L2 domains, VLANs and VRFs, planned before the subnets that
+    # reference them so link_subnet always has something to resolve.
+    "create_l2domain",
+    "update_l2domain",
+    "attach_l2domain",
+    "create_vlan",
+    "update_vlan",
+    "create_vrf",
+    "update_vrf",
+    "link_subnet",
     "create_address",
     "update_address",
     # Only ever emitted when deletion is explicitly enabled -- see
@@ -123,9 +163,55 @@ class Action:
                 f"{field}={value!r}" for field, value in sorted(self.detail.items())
             )
             return f"{self.kind:16} {self.key}  [{changes}]"
+        if self.kind == "link_subnet":
+            bits = []
+            if "vlan" in self.detail:
+                vlan = self.detail["vlan"]
+                bits.append("vlan=" + (
+                    f"{vlan['domain']}/{vlan['number']}" if vlan else "none"))
+            if "vrf" in self.detail:
+                vrf = self.detail["vrf"]
+                bits.append("vrf=" + (vrf["name"] if vrf else "none"))
+            return f"{self.kind:16} {self.key}  [{', '.join(bits)}]"
+        if self.kind == "reparent_subnet":
+            was = self.detail.get("was") or "top level"
+            now = self.detail.get("master_subnet") or "top level"
+            return f"{self.kind:16} {self.key}  [{was} -> {now}]"
         if self.kind in ("drift_subnet", "drift_address", "note"):
             return f"{self.kind:16} {self.key}  -- {self.detail.get('reason', '')}"
         return f"{self.kind:16} {self.key}"
+
+
+def _fold(value):
+    """Case-insensitive comparison key, treating "" and None alike --
+    phpIPAM returns an unset VRF as either."""
+    return str(value or "").strip().casefold()
+
+
+def _vlan_key(reference):
+    """Comparable form of a VLAN reference. Domain names are matched
+    case-insensitively (they are free text on both instances); numbers
+    are compared as strings, as everything in a snapshot is."""
+    if not reference:
+        return None
+    return (_fold(reference.get("domain")), str(reference.get("number") or ""))
+
+
+def _current_parent_cidr(current, cidr_by_id):
+    """The CIDR of a target subnet's current parent, or None if it sits
+    at the top level of its section.
+
+    phpIPAM stores "no parent" as 0 rather than NULL, and returns it as
+    either an int or a string depending on the endpoint, so all of those
+    spellings mean top-level here. A parent id that resolves to nothing
+    (a subnet outside this section, or one the API app cannot see) also
+    reads as top-level -- the subnet then gets moved under the parent the
+    snapshot asks for, which is the outcome we want either way.
+    """
+    raw = current.get("masterSubnetId")
+    if raw in (None, "", 0, "0"):
+        return None
+    return cidr_by_id.get(str(raw))
 
 
 def order_documents(documents):
@@ -189,9 +275,14 @@ def build_plan(documents, target, config):
     # subnets deepest-first) before being appended.
     orphan_addresses = []
     orphan_subnets = []
+    detaches = []
 
+    documents, section_docs = partition_documents(documents)
     documents = order_documents(documents)
-    sections_needed = sorted({document["section"] for document in documents})
+    sections_needed = sorted(
+        {document["section"] for document in documents}
+        | {document["section"] for document in section_docs}
+    )
 
     # -- Sections: resolved once, by name ------------------------------
     section_ids = {}
@@ -217,8 +308,89 @@ def build_plan(documents, target, config):
         ))
         section_ids[source_section] = None  # resolved during apply
 
+    # -- L2 domains, VLANs and VRFs ------------------------------------
+    #
+    # Planned before any subnet, so that a link_subnet later in the same
+    # run always has something to resolve. All three are replicated
+    # whether or not a subnet references them.
+    for document in sorted(section_docs, key=lambda d: d["section"]):
+        source_section = document["section"]
+        section_id = section_ids[source_section]
+
+        for domain in document.get("vlan_domains") or []:
+            name = domain.get("name")
+            if not name:
+                continue
+            existing = target.domain_by_name(name)
+            if existing is None:
+                actions.append(Action(
+                    "create_l2domain", name, dict(domain),
+                    section=source_section,
+                ))
+                continue
+            changed = model.diff_fields(domain, existing)
+            if changed:
+                actions.append(Action(
+                    "update_l2domain", name, changed, section=source_section,
+                ))
+            # A domain that exists but does not yet serve this section
+            # needs adding to, never overwriting: on a fan-in master the
+            # same domain may legitimately serve several subordinates.
+            if section_id is not None:
+                listed = {
+                    part.strip()
+                    for part in str(existing.get("sections") or "").split(";")
+                    if part.strip()
+                }
+                if str(section_id) not in listed and str(existing.get("id")) != "1":
+                    actions.append(Action(
+                        "attach_l2domain", name,
+                        {"section_id": section_id}, section=source_section,
+                    ))
+
+        for vlan in document.get("vlans") or []:
+            domain_name, number = vlan.get("domain"), str(vlan.get("number") or "")
+            if not number:
+                continue
+            key = f"{domain_name}/{number}"
+            existing = target.vlan_by_key(domain_name, number)
+            if existing is None:
+                actions.append(Action(
+                    "create_vlan", key, dict(vlan), section=source_section,
+                ))
+                continue
+            wanted = {k: v for k, v in vlan.items() if k != "domain"}
+            changed = model.diff_fields(wanted, existing)
+            if changed:
+                changed = dict(changed)
+                changed["domain"] = domain_name
+                changed["number"] = number
+                actions.append(Action(
+                    "update_vlan", key, changed, section=source_section,
+                ))
+
+        for vrf in document.get("vrfs") or []:
+            name = vrf.get("name")
+            if not name:
+                continue
+            existing = (
+                target.vrf_by_name(name, section_id)
+                if section_id is not None else None
+            )
+            if existing is None:
+                actions.append(Action(
+                    "create_vrf", name, dict(vrf), section=source_section,
+                ))
+                continue
+            changed = model.diff_fields(vrf, existing)
+            if changed:
+                actions.append(Action(
+                    "update_vrf", name, changed, section=source_section,
+                ))
+
     # -- Subnets and their addresses -----------------------------------
     snapshot_cidrs_by_section = {}
+    cidr_by_id_by_section = {}
     for document in documents:
         source_section = document["section"]
         cidr = document["cidr"]
@@ -228,6 +400,15 @@ def build_plan(documents, target, config):
         existing_subnets = (
             target.subnets_by_cidr(section_id) if section_id is not None else {}
         )
+        # Reverse of existing_subnets, for reading the target's current
+        # parent back as a CIDR. Built once per section: planning never
+        # mutates the target, so this cannot go stale mid-plan.
+        if source_section not in cidr_by_id_by_section:
+            cidr_by_id_by_section[source_section] = {
+                str(record.get("id")): existing_cidr
+                for existing_cidr, record in existing_subnets.items()
+            }
+        cidr_by_id = cidr_by_id_by_section[source_section]
         current = existing_subnets.get(cidr)
 
         if current is None:
@@ -239,6 +420,19 @@ def build_plan(documents, target, config):
                 },
                 section=source_section, cidr=cidr,
             ))
+            # vlanId/vrfId are local ids and cannot be part of the create
+            # payload built from the snapshot; they are resolved from
+            # natural keys once the subnet exists.
+            wanted = {}
+            if document.get("vlan"):
+                wanted["vlan"] = document["vlan"]
+            if document.get("vrf"):
+                wanted["vrf"] = document["vrf"]
+            if wanted:
+                actions.append(Action(
+                    "link_subnet", cidr, wanted,
+                    section=source_section, cidr=cidr,
+                ))
         else:
             changed = model.diff_fields(document["fields"], current)
             if changed:
@@ -247,17 +441,72 @@ def build_plan(documents, target, config):
                     section=source_section, cidr=cidr,
                 ))
 
-        # A VLAN on the source subnet is recorded in the snapshot but not
-        # replicated (VLANs are out of the agreed scope). Surface it so
-        # the omission is visible rather than silently mysterious.
-        vlan = document.get("vlan")
-        if vlan and vlan.get("number"):
-            actions.append(Action(
-                "note", f"{cidr} vlan {vlan['number']}",
-                {"reason": "source subnet has a VLAN; VLANs are not replicated "
-                           "-- set it on the target by hand if needed"},
-                section=source_section, cidr=cidr,
-            ))
+            # VLAN and VRF are local ids on the target, exactly like the
+            # parent below: invisible to diff_fields, so compared here as
+            # natural keys instead. Without this a subnet moved to a
+            # different VLAN upstream would keep the old one forever.
+            wanted = {}
+            desired_vlan = document.get("vlan")
+            current_vlan = target.vlan_ref_for_id(current.get("vlanId"))
+            if _vlan_key(desired_vlan) != _vlan_key(current_vlan):
+                wanted["vlan"] = desired_vlan
+            desired_vrf = (document.get("vrf") or {}).get("name")
+            current_vrf = target.vrf_name_for_id(current.get("vrfId"))
+            if _fold(desired_vrf) != _fold(current_vrf):
+                wanted["vrf"] = document.get("vrf")
+            if wanted:
+                actions.append(Action(
+                    "link_subnet", cidr, wanted,
+                    section=source_section, cidr=cidr,
+                ))
+
+            # Re-parenting is deliberately NOT part of diff_fields.
+            # masterSubnetId is a local id, excluded from the replicated
+            # field set (see model.SUBNET_EXCLUDED_FIELDS), so nothing in
+            # the field comparison can notice that a subnet was moved
+            # under a different parent at the source. Compared here by
+            # CIDR instead -- the same natural key the create path uses.
+            wanted_parent = document.get("master_subnet")
+            current_parent = _current_parent_cidr(current, cidr_by_id)
+            if wanted_parent != current_parent:
+                # Only act when the new parent will actually exist on the
+                # target: either it is already there, or it is in this
+                # snapshot's section and so has been created earlier in
+                # this same run (documents are ordered parents-first).
+                # Otherwise this would be a write that cannot complete,
+                # re-emitted on every run.
+                resolvable = (
+                    wanted_parent is None
+                    or wanted_parent in existing_subnets
+                    or wanted_parent in snapshot_cidrs_by_section[source_section]
+                )
+                if resolvable:
+                    if current_parent is not None:
+                        # Detached first, and before any subnet is
+                        # created, because phpIPAM refuses to create a
+                        # subnet that overlaps one of its siblings-to-be.
+                        # Inserting an intermediate aggregate upstream
+                        # (10.20.0.0/16 gains a 10.20.4.0/22 above an
+                        # existing 10.20.5.0/24) is exactly that case:
+                        # the /22 cannot be created while the /24 is
+                        # still a sibling under the /16.
+                        detaches.append(Action(
+                            "detach_subnet", cidr,
+                            {"was": current_parent},
+                            section=source_section, cidr=cidr,
+                        ))
+                    actions.append(Action(
+                        "reparent_subnet", cidr,
+                        {"master_subnet": wanted_parent, "was": current_parent},
+                        section=source_section, cidr=cidr,
+                    ))
+                else:
+                    actions.append(Action(
+                        "note", f"{cidr} parent {wanted_parent}",
+                        {"reason": f"moved under {wanted_parent} on the source, "
+                                   f"which is not replicated -- left where it is"},
+                        section=source_section, cidr=cidr,
+                    ))
 
         # -- Addresses --------------------------------------------------
         current_addresses = (
@@ -316,6 +565,14 @@ def build_plan(documents, target, config):
     if deleting:
         _check_delete_limit(orphan_addresses, orphan_subnets, target,
                             section_ids, config)
+
+    # Detaches run before every subnet create: phpIPAM validates overlap
+    # against a new subnet's siblings, so a subnet being moved has to be
+    # out of the way before the subnet it is moving *into* can exist.
+    # Section creates stay first -- a detach needs its section resolved.
+    section_creates = [a for a in actions if a.kind == "create_section"]
+    remainder = [a for a in actions if a.kind != "create_section"]
+    actions = section_creates + detaches + remainder
 
     # Addresses first, then subnets deepest-first, so a parent is never
     # removed while a child still points at it.
@@ -389,7 +646,13 @@ def summarise(actions):
 def canonicalise_document_cidr(document):
     """Normalises a document's CIDR through the stdlib, so a snapshot
     written by an older exporter (or hand-edited) still matches target
-    records on the same natural key."""
+    records on the same natural key.
+
+    Section documents carry VLANs and VRFs rather than a subnet, and pass
+    through untouched.
+    """
+    if document.get("kind") == "section" or "cidr" not in document:
+        return document
     network = ipaddress.ip_network(document["cidr"], strict=False)
     document["cidr"] = str(network)
     if document.get("master_subnet"):

@@ -93,6 +93,63 @@ SUBNET_EXCLUDED_FIELDS = frozenset({
     "calculation", "subnetIsFull",
 })
 
+# -- L2 domains, VLANs and VRFs ----------------------------------------
+#
+# Replicated as records in their own right, not merely as a label on a
+# subnet, because a VLAN or VRF defined upstream but not yet attached to
+# anything is still part of what the source owns.
+#
+# The same rule as everywhere else applies to their identity: matched by
+# natural key, never by id. A VLAN is (L2 domain name, number); a VRF is
+# (target section, name). phpIPAM puts no unique index on either, so the
+# same VLAN number in two domains -- or the same VRF name in two sections
+# -- are genuinely separate records, which is what makes fan-in safe.
+
+#: Literal-value L2 domain fields carried across instances.
+DOMAIN_SYNCED_FIELDS = ("name", "description")
+
+#: `permissions` is excluded deliberately: it is a ";"-separated list of
+#: *section ids* local to one instance (phpIPAM's own naming, see
+#: Sections::fetch_section_domains), so carrying it across would point a
+#: domain at unrelated sections. The importer rebuilds it from the target
+#: section it is writing into.
+DOMAIN_EXCLUDED_FIELDS = frozenset({
+    "id", "permissions", "sections", "editDate", "customer_id",
+})
+
+#: Literal-value VLAN fields carried across instances.
+VLAN_SYNCED_FIELDS = ("name", "number", "description")
+
+#: `domainId` is a local id; the domain travels by name instead.
+VLAN_EXCLUDED_FIELDS = frozenset({
+    "id", "vlanId", "domainId", "editDate", "customer_id",
+})
+
+#: Literal-value VRF fields carried across instances.
+VRF_SYNCED_FIELDS = ("name", "rd", "description")
+
+#: `sections` is a local id list, rebuilt on the target like the domain
+#: one above.
+VRF_EXCLUDED_FIELDS = frozenset({
+    "id", "vrfId", "sections", "editDate", "customer_id",
+})
+
+
+def partition_domain(raw, options=None, custom_names=()):
+    return _partition(raw, DOMAIN_SYNCED_FIELDS, DOMAIN_EXCLUDED_FIELDS,
+                      custom_names)
+
+
+def partition_vlan(raw, options=None, custom_names=()):
+    return _partition(raw, VLAN_SYNCED_FIELDS, VLAN_EXCLUDED_FIELDS,
+                      custom_names)
+
+
+def partition_vrf(raw, options=None, custom_names=()):
+    return _partition(raw, VRF_SYNCED_FIELDS, VRF_EXCLUDED_FIELDS,
+                      custom_names)
+
+
 # -- Addresses ---------------------------------------------------------
 
 #: Literal-value address fields carried across instances.

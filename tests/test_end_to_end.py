@@ -52,12 +52,23 @@ class FakePhpIpam:
     real API's habit of returning everything as a string.
     """
 
-    def __init__(self, custom_subnet_fields=(), custom_address_fields=()):
+    def __init__(self, custom_subnet_fields=(), custom_address_fields=(),
+                 first_id=1):
         self.sections = []
         self.subnets = []
         self.addresses = []
         self.vlans = []
-        self._next_id = 1
+        self.vrfs = []
+        # Domain 1 ("default") exists in every phpIPAM install and
+        # belongs to every section, listed or not.
+        self.l2domains = [{"id": "1", "name": "default",
+                           "description": "default L2 domain",
+                           "sections": ""}]
+        # Targets are built with a divergent counter so that a test can
+        # never accidentally pass because the two instances happened to
+        # allocate the same id -- the same reason the lab pushes
+        # instance 2's auto-increment forward.
+        self._next_id = first_id
         self.write_calls = []
         # Custom-field column names, as phpIPAM would have them: plain
         # extra columns whose names the admin chose.
@@ -116,10 +127,25 @@ class FakePhpIpam:
         self.addresses.append(record)
         return record["id"]
 
-    def add_vlan(self, number, name):
-        vlan = {"id": self._new_id(), "number": str(number), "name": name}
+    def add_vlan(self, number, name, domain_id="1"):
+        vlan = {"id": self._new_id(), "number": str(number), "name": name,
+                "domainId": str(domain_id), "description": ""}
         self.vlans.append(vlan)
         return vlan["id"]
+
+    def add_l2domain(self, name, sections=None, domain_id=None):
+        domain = {"id": str(domain_id or self._new_id()), "name": name,
+                  "description": "",
+                  "sections": ";".join(str(s) for s in (sections or []))}
+        self.l2domains.append(domain)
+        return domain["id"]
+
+    def add_vrf(self, name, sections=None, rd="", description=""):
+        vrf = {"id": self._new_id(), "name": name, "rd": rd,
+               "description": description,
+               "sections": ";".join(str(s) for s in (sections or []))}
+        self.vrfs.append(vrf)
+        return vrf["id"]
 
     def subnet_by_cidr(self, cidr):
         network, mask = cidr.split("/")
@@ -154,6 +180,65 @@ class FakePhpIpam:
             if record["id"] == str(address_id):
                 return self._present(record, self.custom_address_fields, True)
         return None
+
+    def get_l2domains(self):
+        # Domain 1 always exists in phpIPAM and belongs to every section.
+        return [dict(d) for d in self.l2domains]
+
+    def get_vlans(self):
+        return [dict(v) for v in self.vlans]
+
+    def get_vrfs(self):
+        return [dict(v) for v in self.vrfs]
+
+    def create_l2domain(self, name, *, sections=None, **fields):
+        self.write_calls.append(("create_l2domain", name))
+        return self.add_l2domain(name, sections=sections or [])
+
+    def update_l2domain(self, domain_id, *, sections=None, **fields):
+        self.write_calls.append(("update_l2domain", str(domain_id)))
+        for domain in self.l2domains:
+            if domain["id"] == str(domain_id):
+                domain.update({k: str(v) for k, v in fields.items()})
+                if sections is not None:
+                    domain["sections"] = ";".join(str(s) for s in sections)
+                return
+        raise AssertionError(f"update_l2domain on unknown id {domain_id}")
+
+    def create_vlan(self, *, number, name, domain_id, **fields):
+        self.write_calls.append(("create_vlan", f"{domain_id}/{number}"))
+        new_id = self.add_vlan(number, name, domain_id=domain_id)
+        for vlan in self.vlans:
+            if vlan["id"] == new_id:
+                vlan.update({k: str(v) for k, v in fields.items()})
+        return new_id
+
+    def update_vlan(self, vlan_id, **fields):
+        self.write_calls.append(("update_vlan", str(vlan_id)))
+        for vlan in self.vlans:
+            if vlan["id"] == str(vlan_id):
+                vlan.update({k: str(v) for k, v in fields.items()
+                             if k not in ("domain",)})
+                return
+        raise AssertionError(f"update_vlan on unknown id {vlan_id}")
+
+    def create_vrf(self, *, name, sections=None, **fields):
+        self.write_calls.append(("create_vrf", name))
+        new_id = self.add_vrf(name, sections=sections or [])
+        for vrf in self.vrfs:
+            if vrf["id"] == new_id:
+                vrf.update({k: str(v) for k, v in fields.items()})
+        return new_id
+
+    def update_vrf(self, vrf_id, *, sections=None, **fields):
+        self.write_calls.append(("update_vrf", str(vrf_id)))
+        for vrf in self.vrfs:
+            if vrf["id"] == str(vrf_id):
+                vrf.update({k: str(v) for k, v in fields.items()})
+                if sections is not None:
+                    vrf["sections"] = ";".join(str(s) for s in sections)
+                return
+        raise AssertionError(f"update_vrf on unknown id {vrf_id}")
 
     def get_vlan(self, vlan_id):
         for vlan in self.vlans:
@@ -261,7 +346,7 @@ class TestRoundTrip(unittest.TestCase):
     def setUp(self):
         self.config = make_config()
         self.source, _ = populated_source()
-        self.target = FakePhpIpam()
+        self.target = FakePhpIpam(first_id=500)
         self.target.add_section("Shared")
         self.tmp = tempfile.TemporaryDirectory()
         self.snapshot_dir = self.tmp.name
@@ -286,7 +371,7 @@ class TestRoundTrip(unittest.TestCase):
         kinds = [a.kind for a in actions if a.is_write]
         self.assertEqual(kinds.count("create_subnet"), 2)
         self.assertEqual(kinds.count("create_address"), 2)
-        self.assertEqual(applied, 4)
+        self.assertEqual(applied, 6)
 
     def test_target_matches_source_after_import(self):
         self._sync()
@@ -313,9 +398,12 @@ class TestRoundTrip(unittest.TestCase):
         source_child = self.source.subnet_by_cidr("10.20.5.0/24")
         target_child = self.target.subnet_by_cidr("10.20.5.0/24")
         self.assertNotEqual(source_child["id"], target_child["id"])
-        # The source's vlanId must not have been pasted onto the target,
-        # where it would point at an unrelated VLAN row.
-        self.assertIn(target_child.get("vlanId", "0"), ("0", None, ""))
+        # The VLAN replicates, but the id must be the TARGET's own id for
+        # it -- pasting the source's would point at an unrelated row.
+        target_vlan = next(v for v in self.target.vlans
+                           if v["number"] == "100")
+        self.assertEqual(target_child["vlanId"], target_vlan["id"])
+        self.assertNotEqual(target_child["vlanId"], source_child["vlanId"])
 
     def test_second_import_is_a_no_op(self):
         # The headline assertion -- see this module's docstring.
@@ -434,7 +522,8 @@ class TestCustomFieldDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._export(self._source(), tmp)
             _, documents = read_snapshot(tmp)
-            by_cidr = {d["cidr"]: d for d in documents}
+            by_cidr = {d["cidr"]: d for d in documents
+                       if d.get("kind") != "section"}
             self.assertEqual(by_cidr["10.20.1.0/24"]["fields"]["Owner"],
                              "netops-team")
             # Present and empty, not absent -- so clearing propagates.
@@ -483,7 +572,7 @@ class TestFailedWriteIsContained(unittest.TestCase):
     def test_a_rejected_record_does_not_stop_the_run(self):
         config = make_config()
         source, _ = populated_source()
-        target = FakePhpIpam()
+        target = FakePhpIpam(first_id=500)
         target.add_section("Shared")
 
         # Reject one address the way phpIPAM would reject an unknown
@@ -504,10 +593,94 @@ class TestFailedWriteIsContained(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("10.20.5.10", errors[0])
         # The other three writes (two subnets, one address) still happened.
-        self.assertEqual(applied, 3)
+        self.assertEqual(applied, 5)
         child = target.subnet_by_cidr("10.20.5.0/24")
         ips = {a["ip"] for a in target.get_addresses_in_subnet(child["id"])}
         self.assertEqual(ips, {"10.20.5.2"})
+
+
+class TestReparenting(unittest.TestCase):
+    """A subnet moved under a different parent at the source has to move
+    on the target too.
+
+    `masterSubnetId` is a local id and is excluded from the replicated
+    field set, so nothing in the field comparison can see a re-parent.
+    Until this was handled on its own, a subnet kept whatever parent it
+    had when it was first created, forever, and the two sides silently
+    diverged in structure while every field still matched.
+    """
+
+    def setUp(self):
+        self.config = make_config()
+        self.source, self.section_id = populated_source()
+        self.target = FakePhpIpam(first_id=500)
+        self.target.add_section("Shared")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.snapshot_dir = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+
+    def _sync(self):
+        run_export(self.source, self.snapshot_dir, self.config)
+        return run_import(self.target, self.snapshot_dir, self.config, apply=True)
+
+    def test_moving_a_subnet_under_a_new_parent_moves_it_on_the_target(self):
+        self._sync()
+        original_parent = self.target.subnet_by_cidr("10.20.0.0/16")
+
+        new_parent = self.source.add_subnet(
+            self.section_id, "10.20.4.0", 22, description="new supernet",
+        )
+        self.source.subnet_by_cidr("10.20.5.0/24")["masterSubnetId"] = str(new_parent)
+
+        actions, applied, errors = self._sync()
+        self.assertEqual(errors, [])
+        self.assertIn("reparent_subnet", [action.kind for action in actions])
+
+        child = self.target.subnet_by_cidr("10.20.5.0/24")
+        parent = self.target.subnet_by_cidr("10.20.4.0/22")
+        self.assertEqual(child["masterSubnetId"], parent["id"])
+        # and specifically no longer under the old one
+        self.assertNotEqual(child["masterSubnetId"], original_parent["id"])
+
+    def test_moving_a_subnet_to_the_top_level_clears_its_parent(self):
+        self._sync()
+        self.source.subnet_by_cidr("10.20.5.0/24")["masterSubnetId"] = "0"
+
+        actions, applied, errors = self._sync()
+        self.assertEqual(errors, [])
+        child = self.target.subnet_by_cidr("10.20.5.0/24")
+        # phpIPAM spells "top level" as 0, not null.
+        self.assertEqual(child["masterSubnetId"], "0")
+
+    def test_an_unchanged_parent_produces_no_action(self):
+        """Negative control, and the more important half of this fix.
+
+        Comparing a local id against a natural key is exactly how the
+        endless-update-loop bug happened with custom fields. If this
+        assertion fails, every run re-parents every nested subnet and
+        buries real changes in churn.
+        """
+        self._sync()
+        actions, applied, errors = self._sync()
+        self.assertEqual([a.kind for a in actions if a.is_write], [])
+        self.assertEqual(applied, 0)
+
+    def test_a_parent_outside_the_replicated_section_flattens_to_top_level(self):
+        """The exporter records the parent by CIDR and can only do so for
+        subnets it is exporting, so a parent in a section that is not
+        replicated is recorded as no parent at all. The subnet then moves
+        to the top level of its section on the target, rather than
+        silently keeping a parent that no longer reflects the source."""
+        self._sync()
+
+        other_section = self.source.add_section("LocalOnly")
+        outside = self.source.add_subnet(other_section, "10.99.0.0", 16)
+        self.source.subnet_by_cidr("10.20.5.0/24")["masterSubnetId"] = str(outside)
+
+        actions, applied, errors = self._sync()
+        self.assertEqual(errors, [])
+        child = self.target.subnet_by_cidr("10.20.5.0/24")
+        self.assertEqual(child["masterSubnetId"], "0")
 
 
 if __name__ == "__main__":

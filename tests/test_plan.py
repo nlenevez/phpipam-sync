@@ -21,12 +21,16 @@ from ipamsync.snapshot import build_subnet_document  # noqa: E402
 
 
 class FakeTarget:
-    """Stands in for TargetView. Same three methods build_plan() uses."""
+    """Stands in for TargetView, exposing the methods build_plan() uses."""
 
-    def __init__(self, sections=None, subnets=None, addresses=None):
+    def __init__(self, sections=None, subnets=None, addresses=None,
+                 domains=None, vlans=None, vrfs=None):
         self._sections = sections or {}          # name -> {"id": n}
         self._subnets = subnets or {}            # section id -> {cidr: raw}
         self._addresses = addresses or {}        # subnet id -> {ip: raw}
+        self._domains = domains or {}            # name -> raw
+        self._vlans = vlans or {}                # (domain, number) -> raw
+        self._vrfs = vrfs or {}                  # name -> raw
 
     def section_by_name(self, name):
         for existing, value in self._sections.items():
@@ -39,6 +43,31 @@ class FakeTarget:
 
     def addresses_by_ip(self, subnet_id):
         return self._addresses.get(subnet_id, {})
+
+    def domain_by_name(self, name):
+        return self._domains.get(str(name).casefold())
+
+    def vlan_by_key(self, domain_name, number):
+        return self._vlans.get((str(domain_name).casefold(), str(number)))
+
+    def vrf_by_name(self, name, section_id):
+        raw = self._vrfs.get(str(name).casefold())
+        if raw is None:
+            return None
+        listed = {p for p in str(raw.get("sections") or "").split(";") if p}
+        return raw if str(section_id) in listed else None
+
+    def vlan_ref_for_id(self, vlan_id):
+        for (domain, number), raw in self._vlans.items():
+            if str(raw.get("id")) == str(vlan_id):
+                return {"domain": domain, "number": number}
+        return None
+
+    def vrf_name_for_id(self, vrf_id):
+        for raw in self._vrfs.values():
+            if str(raw.get("id")) == str(vrf_id):
+                return raw.get("name")
+        return None
 
 
 def config(section_map=None, **options):
@@ -123,17 +152,44 @@ class TestSubnetActions(unittest.TestCase):
         actions = build_plan([document()], target, config())
         self.assertEqual(actions, [])
 
-    def test_vlan_on_source_produces_a_visible_note(self):
+    def test_a_subnet_vlan_is_linked_by_natural_key(self):
+        """The VLAN itself is replicated from the section document; the
+        subnet is then pointed at the TARGET's id for it. Superseded the
+        old behaviour, which only printed a note saying VLANs were out of
+        scope."""
         target = FakeTarget(
             sections=self.sections,
-            subnets={3: {"10.20.0.0/24": {"id": 42, "description": "core"}}},
+            subnets={3: {"10.20.0.0/24": {"id": 42, "description": "core",
+                                          "vlanId": "0"}}},
             addresses={42: {}},
+            vlans={("site-a", "100"): {"id": 77, "number": "100",
+                                       "name": "users"}},
         )
         actions = build_plan(
-            [document(vlan={"number": "100", "name": "shared"})], target, config(),
+            [document(vlan={"domain": "Site-A", "number": "100"})],
+            target, config(),
         )
-        self.assertEqual(kinds(actions), ["note"])
-        self.assertFalse(actions[0].is_write)
+        self.assertEqual(kinds(actions), ["link_subnet"])
+        self.assertEqual(actions[0].detail["vlan"],
+                         {"domain": "Site-A", "number": "100"})
+
+    def test_an_unchanged_vlan_produces_no_action(self):
+        """Negative control: the subnet already points at the right VLAN,
+        so comparing a local id against a natural key must not produce a
+        write on every run."""
+        target = FakeTarget(
+            sections=self.sections,
+            subnets={3: {"10.20.0.0/24": {"id": 42, "description": "core",
+                                          "vlanId": "77"}}},
+            addresses={42: {}},
+            vlans={("site-a", "100"): {"id": 77, "number": "100",
+                                       "name": "users"}},
+        )
+        actions = build_plan(
+            [document(vlan={"domain": "Site-A", "number": "100"})],
+            target, config(),
+        )
+        self.assertEqual(kinds(actions), [])
 
 
 class TestAddressActions(unittest.TestCase):

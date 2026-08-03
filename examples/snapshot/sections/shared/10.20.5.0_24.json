@@ -66,11 +66,13 @@
     "tag": "2",
     "threshold": "0"
   },
+  "kind": "subnet",
   "master_subnet": "10.20.0.0/16",
-  "schema_version": 1,
+  "schema_version": 2,
   "section": "Shared",
   "vlan": {
-    "name": "shared-vlan",
+    "domain": "default",
     "number": "100"
-  }
+  },
+  "vrf": null
 }

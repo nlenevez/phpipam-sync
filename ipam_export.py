@@ -31,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ipamsync import model                                    # noqa: E402
 from ipamsync.config import ConfigError, build_client, load_config  # noqa: E402
 from ipamsync.snapshot import (                               # noqa: E402
-    SnapshotError, build_subnet_document, canonical_cidr, write_snapshot,
+    SnapshotError, build_section_document, build_subnet_document,
+    canonical_cidr, write_snapshot,
 )
 
 
@@ -39,26 +40,68 @@ def log(message):
     print(message, flush=True)
 
 
-def _vlan_for(client, subnet, cache):
-    """Resolves a subnet's VLAN to a {number, name} record for the
-    snapshot. VLANs are not replicated (out of scope by design), but the
-    number is recorded so the importer can point out that the target
-    subnet will not have it -- silently dropping the information on a
-    one-way link would make it unrecoverable."""
-    vlan_id = subnet.get("vlanId")
-    if not vlan_id or str(vlan_id) in ("0", ""):
-        return None
-    if vlan_id not in cache:
-        try:
-            vlan = client.get_vlan(vlan_id) or {}
-            cache[vlan_id] = {
-                "number": str(vlan.get("number", "")),
-                "name": vlan.get("name") or "",
-            }
-        except Exception as exc:  # noqa: BLE001
-            log(f"  warning: could not read VLAN id {vlan_id}: {exc}")
-            cache[vlan_id] = None
-    return cache[vlan_id]
+def _section_ids(raw_value):
+    """Parses phpIPAM's ";"-separated section-id list.
+
+    Used for both an L2 domain's section list (which the API reads as
+    `sections` but stores in `vlanDomains.permissions`) and a VRF's, which
+    really is `sections`. Values arrive as "3", "3;7", "" or None.
+    """
+    if raw_value in (None, "", "null"):
+        return set()
+    return {part.strip() for part in str(raw_value).split(";") if part.strip()}
+
+
+def _l2_context(client, section_id, options):
+    """Everything VLAN- and VRF-shaped that belongs to one source section.
+
+    Returns (domains, vlans, vrfs, vlan_ref_by_id, vrf_name_by_id).
+
+    Scoping follows phpIPAM's own rule (Sections::fetch_section_domains):
+    domain id 1 ("default") belongs to every section, and any other
+    domain belongs to the sections listed in its section list. VRFs carry
+    an equivalent list of their own.
+
+    These are collected per section rather than per subnet because a VLAN
+    or VRF that nothing references yet is still part of what the source
+    owns, and must replicate.
+    """
+    section_id = str(section_id)
+    domains, vlans, vrfs = [], [], {}
+    vlan_ref_by_id, vrf_name_by_id = {}, {}
+
+    domain_name_by_id = {}
+    for raw in client.get_l2domains():
+        raw_id = str(raw.get("id"))
+        # phpIPAM reads the list as `sections`; `permissions` is the
+        # column name and is what writes use.
+        listed = _section_ids(raw.get("sections", raw.get("permissions")))
+        if raw_id != "1" and section_id not in listed:
+            continue
+        domain_name_by_id[raw_id] = raw.get("name") or ""
+        fields, _ = model.partition_domain(raw)
+        domains.append(fields)
+
+    for raw in client.get_vlans():
+        domain_id = str(raw.get("domainId") or "1")
+        if domain_id not in domain_name_by_id:
+            continue
+        fields, _ = model.partition_vlan(raw)
+        fields["domain"] = domain_name_by_id[domain_id]
+        vlans.append(fields)
+        vlan_ref_by_id[str(raw.get("id"))] = {
+            "domain": domain_name_by_id[domain_id],
+            "number": str(raw.get("number") or ""),
+        }
+
+    for raw in client.get_vrfs():
+        if section_id not in _section_ids(raw.get("sections")):
+            continue
+        fields, _ = model.partition_vrf(raw)
+        vrfs[str(raw.get("id"))] = fields
+        vrf_name_by_id[str(raw.get("id"))] = raw.get("name") or ""
+
+    return domains, vlans, list(vrfs.values()), vlan_ref_by_id, vrf_name_by_id
 
 
 def _discover_custom_fields(getter, sample_id, kind):
@@ -100,7 +143,6 @@ def export(config, out_dir, fail_on_empty=False):
     # Custom-field names per table, learned once from a single-record
     # read; see _discover_custom_fields.
     custom_names = {"subnet": set(), "address": set()}
-    vlan_cache = {}
 
     all_sections = client.get_sections()
     by_name = {
@@ -120,6 +162,20 @@ def export(config, out_dir, fail_on_empty=False):
             )
 
         section_id = section["id"]
+
+        # VLANs and VRFs first: they replicate whether or not any subnet
+        # references them, so they are gathered from the section itself
+        # rather than discovered while walking subnets.
+        domains, vlans, vrfs, vlan_ref_by_id, vrf_name_by_id = _l2_context(
+            client, section_id, options)
+        documents.append(build_section_document(
+            section_name=section_name, domains=domains,
+            vlans=vlans, vrfs=vrfs,
+        ))
+        if vlans or vrfs:
+            log(f"  {len(vlans)} vlan(s) in {len(domains)} l2 domain(s), "
+                f"{len(vrfs)} vrf(s)")
+
         subnets = client.get_subnets_in_section(section_id)
         log(f"section {section_name!r} (id {section_id}): {len(subnets)} subnet(s)")
 
@@ -203,7 +259,12 @@ def export(config, out_dir, fail_on_empty=False):
                 fields=fields,
                 addresses=addresses,
                 master_subnet=master_subnet,
-                vlan=_vlan_for(client, raw, vlan_cache),
+                vlan=vlan_ref_by_id.get(str(raw.get("vlanId") or "")),
+                vrf=(
+                    {"name": vrf_name_by_id[str(raw.get("vrfId"))]}
+                    if str(raw.get("vrfId") or "") in vrf_name_by_id
+                    else None
+                ),
             ))
             log(f"  {cidr}: {len(addresses)} address(es)")
 

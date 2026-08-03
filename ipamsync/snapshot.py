@@ -65,7 +65,7 @@ from pathlib import Path, PurePosixPath
 #: Bumped only for a breaking change to the file layout or semantics.
 #: The importer refuses a snapshot it does not recognise rather than
 #: guessing at fields that may have changed meaning.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MANIFEST_NAME = "manifest.json"
 SECTIONS_DIR = "sections"
@@ -125,16 +125,60 @@ def _ip_sort_key(ip):
         return (99, 0)
 
 
-def build_subnet_document(*, section_name, cidr, fields, addresses,
-                          master_subnet=None, vlan=None):
-    """Assembles one subnet's document. `addresses` is an iterable of
-    (ip, fields) pairs; they are sorted here so callers need not care."""
+#: Filename holding a section's VLANs and VRFs. Leading underscore so it
+#: can never collide with a subnet slug, which always starts with a digit.
+SECTION_META_NAME = "_section.json"
+
+
+def build_section_document(*, section_name, domains, vlans, vrfs):
+    """Assembles the per-section record of L2 domains, VLANs and VRFs.
+
+    These are replicated whether or not any subnet references them, so
+    they cannot be carried on the subnet documents -- an unattached VLAN
+    would have nowhere to live. Each is identified by natural key:
+    a domain by name, a VLAN by (domain name, number), a VRF by name
+    within this section.
+    """
     return {
         "schema_version": SCHEMA_VERSION,
+        "kind": "section",
+        "section": section_name,
+        "vlan_domains": sorted(domains, key=lambda d: str(d.get("name") or "")),
+        "vlans": sorted(
+            vlans,
+            key=lambda v: (str(v.get("domain") or ""), _vlan_sort_key(v)),
+        ),
+        "vrfs": sorted(vrfs, key=lambda v: str(v.get("name") or "")),
+    }
+
+
+def _vlan_sort_key(vlan):
+    """VLAN numbers sort numerically, so 9 comes before 10 rather than
+    after it -- the same reason addresses sort by integer value."""
+    try:
+        return (0, int(str(vlan.get("number"))))
+    except (TypeError, ValueError):
+        return (1, 0)
+
+
+def build_subnet_document(*, section_name, cidr, fields, addresses,
+                          master_subnet=None, vlan=None, vrf=None):
+    """Assembles one subnet's document. `addresses` is an iterable of
+    (ip, fields) pairs; they are sorted here so callers need not care.
+
+    `vlan` and `vrf` are *references* by natural key -- {"domain", "number"}
+    and {"name"} -- not the records themselves, which live in the section
+    document. Carrying the id would point at an unrelated row on the
+    target, the same trap as masterSubnetId.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "subnet",
         "section": section_name,
         "cidr": cidr,
         "master_subnet": master_subnet,
         "vlan": vlan,
+        "vrf": vrf,
         "fields": fields,
         "addresses": [
             {"ip": ip, "fields": address_fields}
@@ -162,14 +206,21 @@ def write_snapshot(out_dir, documents, *, source, sections, dropped_fields=None)
     out_dir = Path(out_dir)
     sections_root = out_dir / SECTIONS_DIR
     sections_root.mkdir(parents=True, exist_ok=True)
+    subnet_docs, section_docs = partition_documents(documents)
 
     files = {}
     written_paths = set()
     for document in documents:
-        rel = (
-            f"{SECTIONS_DIR}/{_slug(document['section'])}/"
-            f"{subnet_slug(document['cidr'])}.json"
-        )
+        if document.get("kind") == "section":
+            rel = (
+                f"{SECTIONS_DIR}/{_slug(document['section'])}/"
+                f"{SECTION_META_NAME}"
+            )
+        else:
+            rel = (
+                f"{SECTIONS_DIR}/{_slug(document['section'])}/"
+                f"{subnet_slug(document['cidr'])}.json"
+            )
         if rel in files:
             # Two different section names or CIDRs slugging to one path
             # would silently drop a subnet. Refuse rather than lose data.
@@ -198,8 +249,10 @@ def write_snapshot(out_dir, documents, *, source, sections, dropped_fields=None)
         "exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source": source,
         "sections": sorted(sections),
-        "subnet_count": len(documents),
-        "address_count": sum(len(d["addresses"]) for d in documents),
+        "subnet_count": len(subnet_docs),
+        "address_count": sum(len(d["addresses"]) for d in subnet_docs),
+        "vlan_count": sum(len(d.get("vlans") or []) for d in section_docs),
+        "vrf_count": sum(len(d.get("vrfs") or []) for d in section_docs),
         "dropped_source_fields": dropped_fields or {},
         "files": dict(sorted(files.items())),
     }
@@ -295,6 +348,22 @@ def _safe_relative_path(in_dir, rel):
             f"outside the snapshot directory {root}. Refusing to read it."
         )
     return path
+
+
+def partition_documents(documents):
+    """Splits a snapshot's documents into (subnets, section records).
+
+    Kept as a helper rather than two return values from read_snapshot so
+    that the checksum verification stays one loop over exactly what the
+    manifest lists -- nothing gets read or skipped based on what it turns
+    out to contain.
+    """
+    subnets, sections = [], []
+    for document in documents:
+        (sections if document.get("kind") == "section" else subnets).append(
+            document
+        )
+    return subnets, sections
 
 
 def read_snapshot(in_dir):

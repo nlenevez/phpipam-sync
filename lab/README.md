@@ -12,9 +12,9 @@ cd lab
 ./setup.sh                                   # bring up + seed all three instances
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
-./verify.sh                                  # 1:1 -- 47 assertions
-./verify-fanin.sh                            # fan-in -- 23 assertions
-./verify-catchup.sh                          # mirror outage -- 15 assertions
+./verify.sh                                  # 1:1 -- 66 assertions
+./verify-fanin.sh                            # fan-in -- 22 assertions
+./verify-catchup.sh                          # mirror outage -- 14 assertions
 docker compose down                          # destroy everything
 ```
 
@@ -134,7 +134,7 @@ writes require.
 
 ### 4. An endless update loop on custom fields
 
-The most consequential of the four, and the least visible. With nesting
+The most consequential of these, and the least visible. With nesting
 enabled, the *target* also returns custom fields nested — so comparing
 the snapshot's flat `Owner` against a target record that had it under
 `custom_fields` never matched. Every run therefore "found" a difference
@@ -151,6 +151,33 @@ history on every cron run, burying real changes in noise. Fixed by
 flattening target records on read (`model.flatten_custom_fields`), and
 covered by `test_flattened_target_compares_equal_to_the_snapshot` plus
 the lab's step 6.
+
+### 5. Overlap is validated on create, but not on update
+
+```
+POST  subnets/ {"subnet":"10.60.4.0","mask":"22","masterSubnetId":904}
+  ->  409 "Subnet overlaps with 10.60.5.0/24"      (a sibling under 904)
+PATCH subnets/905/ {"masterSubnetId":906}
+  ->  200 Subnet updated                            (no validation at all)
+PATCH subnets/905/ {"masterSubnetId":0}
+  ->  200 Subnet updated                            (even with ancestors present)
+```
+
+Found by adding step 11 to `verify.sh`, and invisible to the unit suite,
+whose fake has no concept of overlap. It matters because the ordinary
+case of "someone inserted an intermediate aggregate upstream" hits it
+head-on: the new `/22` cannot be created while the `/24` it will contain
+is still a sibling under the same parent.
+
+Because PATCH is *not* validated, the fix is an ordering one — detach
+every subnet that is moving before creating anything, then re-attach.
+See "Re-parenting" in `ipamsync/plan.py`.
+
+The asymmetry cuts both ways: the same missing validation on PATCH means
+phpIPAM will happily let the API build a hierarchy its own create path
+would have rejected. This tool only ever writes parents that the source
+already had, so it does not exploit that — but it is worth knowing before
+trusting `masterSubnetId` from any other writer.
 
 ### What the failure looked like, and why it was contained
 
@@ -190,4 +217,4 @@ a first export against your own instances: it names every field the
 source returned that the tool did not carry.
 
 Not covered: instances with custom `ipTags` (see `options.sync_tags` in
-the main README), VRFs, and phpIPAM's permissions model.
+the main README) and phpIPAM's permissions model.

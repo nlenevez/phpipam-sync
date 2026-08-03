@@ -54,15 +54,24 @@ The index. Note:
 their own — and the case that exposed phpIPAM returning **404 for an
 empty collection** rather than an empty list. See `lab/README.md`.
 
+### `_section.json` — the VLANs and VRFs
+
+One per section, holding its L2 domains, VLANs and VRFs. They live here
+rather than on the subnets that use them because they replicate whether
+or not anything references them — note `voice` and `CUST-B`, which
+nothing points at, and `mgmt` on VLAN 9, which is there to prove numbers
+sort numerically rather than as strings.
+
 ### `10.20.5.0_24.json` — the interesting one
 
 - **`master_subnet: "10.20.0.0/16"`** — nesting recorded by the parent's
   **CIDR**, never its id. Database ids are meaningless across instances,
   so the target re-resolves the parent locally. This is the whole
   natural-key design in one field.
-- **`vlan`** — recorded but **not replicated**; VLANs are separate master
-  data with their own ids. The importer prints a note so the omission is
-  visible rather than mysterious.
+- **`vlan`** — a *reference* by natural key, `{"domain", "number"}`,
+  never the VLAN's id. The VLAN itself is defined once in
+  `_section.json`; the importer resolves this reference to the target's
+  own id. `vrf` works the same way, keyed by name.
 - **`fields.Owner` and `fields.custom_Notes`** — custom fields, stored
   **flat**. `Owner` has no prefix, which is what phpIPAM's UI actually
   produces; `custom_Notes` happens to have one. Both are carried because

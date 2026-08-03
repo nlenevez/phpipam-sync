@@ -28,6 +28,8 @@
 #   7. changes propagate as minimal field-level updates
 #   8. deletions upstream and local records on the replica both survive
 #   9. custom fields and IPv6 replicate
+#  9b. a subnet re-parented upstream is re-parented on the replica,
+#      including the case where the new parent is created in the same run
 #  10. --delete makes it a strict mirror, and the safety limit stops a
 #      snapshot that would wipe the replica
 
@@ -129,8 +131,8 @@ say "4. apply"
 import_now --apply > "$WORK/apply.log" 2>&1
 RC=$?
 check "apply exit status" "0" "$RC"
-grep -q "applied 9 change(s), 0 error(s)" "$WORK/apply.log" \
-    && pass "9 changes applied, no errors" \
+grep -q "applied 17 change(s), 0 error(s)" "$WORK/apply.log" \
+    && pass "17 changes applied, no errors" \
     || fail "unexpected apply result: $(grep -E '^applied' "$WORK/apply.log")"
 
 say "5. the replica matches, with its own ids"
@@ -226,7 +228,112 @@ check "IPv6 subnet description" "Shared v6 /64" \
 check "IPv6 address replicated" "v6-gw" \
       "$(sql2 "SELECT hostname FROM ipaddresses WHERE subnetId=$V6;")"
 
-say "11. strict mirror: --delete removes what the snapshot dropped"
+say "11. a subnet moved under a different parent moves on the replica"
+# masterSubnetId is a local id and is excluded from the replicated field
+# set, so a re-parent is invisible to the field comparison and has to be
+# detected by comparing parents as CIDRs. Before that was handled, a
+# subnet kept its original parent on the replica forever while every
+# field still matched -- a structural divergence that looked like a
+# clean sync.
+#
+# The realistic shape of this: someone inserts an intermediate aggregate
+# upstream and moves an existing /24 underneath it.
+SRC_SEC=$(sql1 "SELECT sectionId FROM subnets WHERE id=$SRC_ID;")
+SRC_SUPER=$(sql1 "SELECT id FROM subnets WHERE subnet=INET_ATON('10.20.0.0') AND mask=16;")
+sql1 "INSERT INTO subnets (subnet,mask,sectionId,masterSubnetId,description)
+      VALUES (INET_ATON('10.20.4.0'),22,$SRC_SEC,$SRC_SUPER,'intermediate aggregate');" >/dev/null
+SRC_MID=$(sql1 "SELECT id FROM subnets WHERE subnet=INET_ATON('10.20.4.0') AND mask=22;")
+sql1 "UPDATE subnets SET masterSubnetId=$SRC_MID WHERE id=$SRC_ID;" >/dev/null
+
+export_now >/dev/null 2>&1
+ship
+import_now --apply > "$WORK/reparent.log" 2>&1
+grep -q "reparent_subnet .*10.20.5.0/24" "$WORK/reparent.log" \
+    && pass "re-parent planned as its own action" \
+    || fail "no reparent_subnet action: $(grep -E '^(applied|summary)' "$WORK/reparent.log")"
+
+DST_MID=$(sql2 "SELECT id FROM subnets WHERE subnet=INET_ATON('10.20.4.0') AND mask=22;")
+check "replica created the intermediate aggregate" "1" \
+      "$([ -n "$DST_MID" ] && echo 1 || echo 0)"
+check "replica moved the /24 under it" "$DST_MID" \
+      "$(sql2 "SELECT masterSubnetId FROM subnets WHERE id=$DST_ID;")"
+# The ids must differ across instances, or this proves nothing about
+# natural-key resolution.
+[ "$SRC_MID" != "$DST_MID" ] \
+    && pass "and did so by CIDR, not by copying the source id ($SRC_MID vs $DST_MID)" \
+    || fail "source and replica ids coincide ($SRC_MID) -- test cannot distinguish"
+
+# Re-running must not move it again: comparing a local id against a
+# natural key is exactly how the endless-update-loop bug happened.
+import_now --apply > "$WORK/reparent-again.log" 2>&1
+grep -q "changes: none" "$WORK/reparent-again.log" \
+    && pass "re-parent is idempotent (no churn on the next run)" \
+    || fail "re-parent churns: $(grep -E '^applied' "$WORK/reparent-again.log")"
+
+say "11b. VLANs and VRFs replicate, including unattached ones"
+# Replicated as records in their own right: a VLAN or VRF defined
+# upstream but attached to nothing is still part of what the source
+# owns. Matched by natural key -- a VLAN by (L2 domain, number), a VRF
+# by (section, name) -- because phpIPAM has no unique index on either
+# and the ids differ between instances.
+check "L2 domain replicated by name" "1" \
+      "$(sql2 "SELECT COUNT(*) FROM vlanDomains WHERE name='Site-A';")"
+DST_DOM=$(sql2 "SELECT id FROM vlanDomains WHERE name='Site-A';")
+SRC_DOM=$(sql1 "SELECT id FROM vlanDomains WHERE name='Site-A';")
+[ -n "$DST_DOM" ] && [ "$SRC_DOM" != "$DST_DOM" ] \
+    && pass "and with the replica's own domain id ($SRC_DOM vs $DST_DOM)" \
+    || fail "domain ids did not diverge (src=$SRC_DOM dst=$DST_DOM)"
+
+# vlanDomains.permissions is a ";"-separated list of SECTION ids despite
+# the name -- the importer must scope the domain to the target section.
+check "domain scoped to the replica's own section id" "500" \
+      "$(sql2 "SELECT permissions FROM vlanDomains WHERE name='Site-A';")"
+
+check "attached VLAN replicated"   "shared-vlan" \
+      "$(sql2 "SELECT name FROM vlans WHERE number=100;")"
+check "UNattached VLAN replicated" "voice" \
+      "$(sql2 "SELECT name FROM vlans WHERE number=200;")"
+check "single-digit VLAN replicated" "mgmt" \
+      "$(sql2 "SELECT name FROM vlans WHERE number=9;")"
+check "attached VRF replicated"    "65000:1" \
+      "$(sql2 "SELECT rd FROM vrf WHERE name='CUST-A';")"
+check "UNattached VRF replicated"  "65000:2" \
+      "$(sql2 "SELECT rd FROM vrf WHERE name='CUST-B';")"
+check "VRF scoped to the replica's own section id" "500" \
+      "$(sql2 "SELECT sections FROM vrf WHERE name='CUST-A';")"
+
+# The subnet must point at the REPLICA's vlan id, never the source's.
+DST_VLAN=$(sql2 "SELECT vlanId FROM subnets WHERE id=$DST_ID;")
+DST_VLAN_NUM=$(sql2 "SELECT number FROM vlans WHERE vlanId=$DST_VLAN;")
+check "subnet linked to the right VLAN by number" "100" "$DST_VLAN_NUM"
+SRC_VLAN=$(sql1 "SELECT vlanId FROM subnets WHERE id=$SRC_ID;")
+[ "$SRC_VLAN" != "$DST_VLAN" ] \
+    && pass "and by natural key, not by copying the id ($SRC_VLAN vs $DST_VLAN)" \
+    || fail "vlanId was copied across instances ($SRC_VLAN)"
+
+DST_V4=$(sql2 "SELECT id FROM subnets WHERE subnet=INET_ATON('10.30.0.0') AND mask=24;")
+DST_VRF=$(sql2 "SELECT vrfId FROM subnets WHERE id=$DST_V4;")
+check "subnet linked to the right VRF" "CUST-A" \
+      "$(sql2 "SELECT name FROM vrf WHERE vrfId=$DST_VRF;")"
+
+# Moving a subnet to a different VLAN upstream must move it here too --
+# vlanId is a local id, so this is the same class of bug as re-parenting.
+sql1 "UPDATE subnets SET vlanId=11 WHERE id=$SRC_ID;" >/dev/null
+export_now >/dev/null 2>&1
+ship
+import_now --apply > "$WORK/vlanmove.log" 2>&1
+grep -q "link_subnet" "$WORK/vlanmove.log" \
+    && pass "VLAN change planned as its own action" \
+    || fail "no link_subnet action: $(grep -E '^applied' "$WORK/vlanmove.log")"
+DST_VLAN2=$(sql2 "SELECT vlanId FROM subnets WHERE id=$DST_ID;")
+check "subnet moved to the new VLAN" "200" \
+      "$(sql2 "SELECT number FROM vlans WHERE vlanId=$DST_VLAN2;")"
+import_now --apply > "$WORK/vlanmove2.log" 2>&1
+grep -q "changes: none" "$WORK/vlanmove2.log" \
+    && pass "VLAN link is idempotent (no churn on the next run)" \
+    || fail "VLAN link churns: $(grep -E '^applied' "$WORK/vlanmove2.log")"
+
+say "12. strict mirror: --delete removes what the snapshot dropped"
 # Up to here the run has been additive, so the replica still holds
 # 10.20.5.20 (deleted upstream in step 7) and 10.20.5.99 (replica-only).
 # Both are orphans, so a strict-mirror run must remove exactly those two.
@@ -251,7 +358,7 @@ grep -q "changes: none" "$WORK/delete2.log" \
     && pass "strict mirror is idempotent too" \
     || fail "second strict-mirror run was not a no-op: $(grep -E '^summary' "$WORK/delete2.log")"
 
-say "12. the delete safety limit refuses a mass deletion"
+say "13. the delete safety limit refuses a mass deletion"
 # The limit is a FRACTION of the in-scope records, with a small absolute
 # floor so tiny datasets are not permanently blocked. The seed data alone
 # is under that floor, so bulk up first -- otherwise this step would pass
@@ -293,7 +400,7 @@ else
     fail "--force-delete did not delete anything ($BULK -> $AFTER)"
 fi
 
-say "13. a corrupted snapshot is refused"
+say "14. a corrupted snapshot is refused"
 python3 - "$WORK/side2-data" <<'PY'
 import pathlib, sys
 p = next(pathlib.Path(sys.argv[1]).glob("sections/*/*.json"))

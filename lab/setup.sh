@@ -112,6 +112,8 @@ ALTER TABLE sections    AUTO_INCREMENT=500;
 ALTER TABLE subnets     AUTO_INCREMENT=900;
 ALTER TABLE ipaddresses AUTO_INCREMENT=7000;
 ALTER TABLE vlans       AUTO_INCREMENT=300;
+ALTER TABLE vlanDomains AUTO_INCREMENT=40;
+ALTER TABLE vrf         AUTO_INCREMENT=60;
 EOF
 
 say "seeding instance 1 (source of truth)"
@@ -129,8 +131,24 @@ print("INSERT INTO sections (id,name,description,permissions,strictMode,`order`)
 # A section that is NOT replicated -- proves scoping actually scopes.
 print("INSERT INTO sections (id,name,description,permissions,strictMode,`order`) "
       "VALUES (2,'LocalOnly','Must never be replicated','{\"3\":\"1\"}',1,2);")
+# An L2 domain scoped to the Shared section, plus VLANs inside it.
+# vlanDomains.permissions holds a ";"-separated list of SECTION ids
+# despite the name -- see phpIPAM's Sections::fetch_section_domains.
+# Domain 1 ("default") belongs to every section implicitly.
+print("INSERT INTO vlanDomains (id,name,description,permissions) "
+      "VALUES (2,'Site-A','L2 domain for the Shared section','1');")
 print("INSERT INTO vlans (vlanId,domainId,name,number,description) "
       "VALUES (10,1,'shared-vlan',100,'lab vlan');")
+# A VLAN nothing references: it must replicate anyway.
+print("INSERT INTO vlans (vlanId,domainId,name,number,description) "
+      "VALUES (11,2,'voice',200,'unattached on purpose');")
+print("INSERT INTO vlans (vlanId,domainId,name,number,description) "
+      "VALUES (12,2,'mgmt',9,'single digit, to catch string sorting');")
+# VRFs are scoped by a real `sections` column. One attached, one not.
+print("INSERT INTO vrf (vrfId,name,rd,description,sections) "
+      "VALUES (5,'CUST-A','65000:1','customer A','1');")
+print("INSERT INTO vrf (vrfId,name,rd,description,sections) "
+      "VALUES (6,'CUST-B','65000:2','unattached on purpose','1');")
 # A supernet with no addresses of its own (this is what exposed
 # phpIPAM's 404-on-empty-collection behaviour), a nested /24 with a
 # VLAN, and an unrelated top-level /24.
@@ -138,8 +156,8 @@ print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId
       f"VALUES (11,'{d('10.20.0.0')}','16',1,'Shared supernet',0,1,2);")
 print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,vlanId,pingSubnet,state) "
       f"VALUES (12,'{d('10.20.5.0')}','24',1,'Shared /24',11,10,1,2);")
-print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,state) "
-      f"VALUES (13,'{d('10.30.0.0')}','24',1,'Standalone /24',0,2);")
+print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,vrfId,state) "
+      f"VALUES (13,'{d('10.30.0.0')}','24',1,'Standalone /24',0,5,2);")
 print(f"INSERT INTO subnets (id,subnet,mask,sectionId,description,masterSubnetId,state) "
       f"VALUES (14,'{d('192.168.99.0')}','24',2,'Local only subnet',0,2);")
 print("UPDATE subnets SET `Owner`='netops-team', custom_Notes='prefixed note' WHERE id=12;")

@@ -1,0 +1,47 @@
+{
+  "kind": "section",
+  "schema_version": 2,
+  "section": "Shared",
+  "vlan_domains": [
+    {
+      "description": "L2 domain for the Shared section",
+      "name": "Site-A"
+    },
+    {
+      "description": "default L2 domain",
+      "name": "default"
+    }
+  ],
+  "vlans": [
+    {
+      "description": "single digit, to catch string sorting",
+      "domain": "Site-A",
+      "name": "mgmt",
+      "number": "9"
+    },
+    {
+      "description": "unattached on purpose",
+      "domain": "Site-A",
+      "name": "voice",
+      "number": "200"
+    },
+    {
+      "description": "lab vlan",
+      "domain": "default",
+      "name": "shared-vlan",
+      "number": "100"
+    }
+  ],
+  "vrfs": [
+    {
+      "description": "customer A",
+      "name": "CUST-A",
+      "rd": "65000:1"
+    },
+    {
+      "description": "unattached on purpose",
+      "name": "CUST-B",
+      "rd": "65000:2"
+    }
+  ]
+}

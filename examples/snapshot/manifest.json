@@ -1,14 +1,15 @@
 {
   "address_count": 5,
   "dropped_source_fields": {},
-  "exported_at": "2026-07-23T05:13:37Z",
+  "exported_at": "2026-08-03T01:17:08Z",
   "files": {
-    "sections/shared/10.20.0.0_16.json": "7bf10872e6e765792bcc707b3b2a25111556be073d7f2fcf6bd885ff1c62e6d3",
-    "sections/shared/10.20.5.0_24.json": "2d8229c95adb22282b4702fd5749af3bebc77eafecfe5cac55763c6d1271377a",
-    "sections/shared/10.30.0.0_24.json": "d9c38965a0026039224801cb1b844aec096452fcd3274e5c98933b8bfedda692",
-    "sections/shared/2001-db8-5--_64.json": "4bdfd754e91b3ed7df72708552a64fd80b6558da7408611dc09149e6a6d96f8c"
+    "sections/shared/10.20.0.0_16.json": "cff53ae4a7c404ff0085c79e4c3e24b2745d540aaa8e4b0b9e30e63c75e808e8",
+    "sections/shared/10.20.5.0_24.json": "46493e22bbee38942385fdeb22dafaa7f9b420e79b14419612677848aebd6dad",
+    "sections/shared/10.30.0.0_24.json": "3ffc83c2fb0ab9d06f3d69a92d3437d5dd5ac44c8224b7adcf60670b7fc7480e",
+    "sections/shared/2001-db8-5--_64.json": "bd700493151a4c1ca03739bff9a50e9d20eb8ba9752fee8d4a31482da52f3b1a",
+    "sections/shared/_section.json": "285542955a9bc583fbbdd6040ee88a0bdb179348a258eefd3c10d5c59fb55619"
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "sections": [
     "Shared"
   ],
@@ -16,5 +17,7 @@
     "app_id": "sync",
     "base_url": "https://127.0.0.1:8443"
   },
-  "subnet_count": 4
+  "subnet_count": 4,
+  "vlan_count": 3,
+  "vrf_count": 2
 }

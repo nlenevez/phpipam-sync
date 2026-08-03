@@ -171,7 +171,46 @@ class PhpIpamClient:
         free-IP string). Raises PhpIpamError on any failure.
         """
         url = f"{self.base_url}/api/{self.app_id}/{path.lstrip('/')}"
-        headers = {"token": self._token}
+        headers = {
+            "token": self._token,
+            # Sent on EVERY request, including bodyless GETs and DELETEs
+            # where it describes a body that does not exist. That looks
+            # redundant and is not.
+            #
+            # phpIPAM rejects any request content type it does not
+            # recognise (api/controllers/Responses.php,
+            # validate_content_type) with
+            #
+            #     415 Invalid Content type <value>
+            #
+            # Absent is accepted, and so is empty -- but anything else
+            # outside {application/json, application/xml,
+            # application/x-www-form-urlencoded} is refused, and that
+            # includes a whitespace-only value, whose message then reads
+            # as if it were truncated. Sending no header therefore leaves
+            # the choice to whatever sits in front of phpIPAM: nginx,
+            # php-fpm's fastcgi_param CONTENT_TYPE, a reverse proxy or a
+            # WAF can each supply one. Naming ours means nothing else
+            # gets to.
+            #
+            # Two additional notes, both verified rather than assumed:
+            #
+            #  * On phpIPAM <= 1.7.x the check reads `strlen(@$ct==0)` --
+            #    the `==0` inside strlen(), fixed to `strlen(@$ct)==0` in
+            #    1.8.1. On PHP 7 that evaluates strlen(true) -> 1, so the
+            #    branch always fired and the check passed *everything*;
+            #    on PHP 8 `"" == 0` is false, so it starts enforcing and
+            #    an empty value is refused too. Those versions therefore
+            #    break on a PHP upgrade, not a phpIPAM one.
+            #
+            #  * application/json is accepted by 1.5.2, 1.7.4 and 1.8.1
+            #    on both PHP majors -- all six combinations checked
+            #    against the real function body.
+            #
+            # Safe where there is no body: api/index.php only parses the
+            # body after an is_blank() check, so an empty one is skipped.
+            "Content-Type": "application/json",
+        }
 
         try:
             resp = requests.request(
@@ -322,10 +361,74 @@ class PhpIpamClient:
     def delete_address(self, address_id):
         return self._request("DELETE", f"addresses/{address_id}/")
 
-    # -- VLANs (read-only for now -- no create/update workflow named yet) --
+    # -- L2 domains, VLANs and VRFs ---------------------------------------
+    #
+    # Two naming traps live in here, both confirmed against 1.8.1 rather
+    # than taken from the documentation:
+    #
+    #  * An L2 domain's section list is READ as `sections` and WRITTEN as
+    #    `permissions`. Posting `sections` is rejected outright with
+    #    `400 Invalid request key sections`. The underlying column is
+    #    `vlanDomains.permissions`, and it holds a ";"-separated list of
+    #    *section ids* despite the name -- see phpIPAM's own
+    #    Sections::fetch_section_domains(). Domain id 1 ("default") is
+    #    implicitly in every section and is not listed there.
+    #  * VLANs and VRFs are read back with their primary key as `id`,
+    #    not as the `vlanId`/`vrfId` the tables actually use.
+    #
+    # Both endpoints accept singular and plural spellings (`vlan/` and
+    # `vlans/`); the plural is used here for consistency with the rest.
+
+    def get_l2domains(self):
+        return self._request("GET", "l2domains/") or []
+
+    def create_l2domain(self, name, *, sections=None, **fields):
+        """Creates an L2 domain. `sections` is an iterable of *target*
+        section ids the domain should be visible in; it is sent as
+        `permissions` because that is the only spelling writes accept."""
+        payload = {"name": name, **fields}
+        if sections is not None:
+            payload["permissions"] = ";".join(str(one) for one in sections)
+        return self._request("POST", "l2domains/", json_body=payload)
+
+    def update_l2domain(self, domain_id, *, sections=None, **fields):
+        payload = dict(fields)
+        if sections is not None:
+            payload["permissions"] = ";".join(str(one) for one in sections)
+        return self._request("PATCH", f"l2domains/{domain_id}/",
+                             json_body=payload)
 
     def get_vlans(self):
         return self._request("GET", "vlans/") or []
 
     def get_vlan(self, vlan_id):
         return self._request("GET", f"vlans/{vlan_id}/")
+
+    def create_vlan(self, *, number, name, domain_id, **fields):
+        payload = {"number": number, "name": name,
+                   "domainId": domain_id, **fields}
+        return self._request("POST", "vlans/", json_body=payload)
+
+    def update_vlan(self, vlan_id, **fields):
+        return self._request("PATCH", f"vlans/{vlan_id}/", json_body=fields)
+
+    def get_vrfs(self):
+        return self._request("GET", "vrfs/") or []
+
+    def get_vrf(self, vrf_id):
+        return self._request("GET", f"vrfs/{vrf_id}/")
+
+    def create_vrf(self, *, name, sections=None, **fields):
+        """Creates a VRF. Unlike L2 domains, a VRF's section list really
+        is called `sections` on both read and write -- it is a genuine
+        column on the `vrf` table."""
+        payload = {"name": name, **fields}
+        if sections is not None:
+            payload["sections"] = ";".join(str(one) for one in sections)
+        return self._request("POST", "vrfs/", json_body=payload)
+
+    def update_vrf(self, vrf_id, *, sections=None, **fields):
+        payload = dict(fields)
+        if sections is not None:
+            payload["sections"] = ";".join(str(one) for one in sections)
+        return self._request("PATCH", f"vrfs/{vrf_id}/", json_body=payload)

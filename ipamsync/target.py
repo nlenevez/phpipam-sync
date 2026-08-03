@@ -31,6 +31,7 @@ import re
 
 from ipamsync import model
 from ipamsync.model import CUSTOM_FIELD_PREFIX
+from phpipam_client import PhpIpamError
 from ipamsync.plan import split_cidr
 from ipamsync.snapshot import canonical_cidr
 
@@ -48,6 +49,7 @@ class TargetView:
         self._sections = None
         self._subnets = {}     # section_id -> {cidr: raw subnet}
         self._addresses = {}   # subnet_id  -> {ip: raw address}
+        self._l2 = None        # domains/vlans/vrfs, indexed by natural key
 
     # -- Sections ------------------------------------------------------
 
@@ -97,6 +99,90 @@ class TargetView:
 
     def invalidate_subnets(self, section_id):
         self._subnets.pop(section_id, None)
+
+    # -- L2 domains, VLANs and VRFs ------------------------------------
+    #
+    # Indexed by natural key like everything else: a domain by name, a
+    # VLAN by (domain name, number), a VRF by (section id, name). The
+    # reverse maps exist so a subnet's current vlanId/vrfId can be read
+    # back as a natural key and compared against the snapshot -- the same
+    # move that makes re-parenting work, and for the same reason: an id
+    # on its own says nothing that can be compared across instances.
+
+    def _load_l2(self):
+        if self._l2 is None:
+            domains = self._client.get_l2domains()
+            domain_name_by_id = {
+                str(d.get("id")): (d.get("name") or "") for d in domains
+            }
+            vlans, vlan_ref_by_id = {}, {}
+            for raw in self._client.get_vlans():
+                domain = domain_name_by_id.get(str(raw.get("domainId") or "1"), "")
+                key = (domain.strip().casefold(), str(raw.get("number") or ""))
+                vlans[key] = raw
+                vlan_ref_by_id[str(raw.get("id"))] = {
+                    "domain": domain, "number": str(raw.get("number") or ""),
+                }
+            vrfs, vrf_name_by_id = [], {}
+            for raw in self._client.get_vrfs():
+                vrfs.append(raw)
+                vrf_name_by_id[str(raw.get("id"))] = raw.get("name") or ""
+            self._l2 = {
+                "domains": {
+                    str(d.get("name") or "").strip().casefold(): d
+                    for d in domains
+                },
+                "vlans": vlans,
+                "vlan_ref_by_id": vlan_ref_by_id,
+                "vrfs": vrfs,
+                "vrf_name_by_id": vrf_name_by_id,
+            }
+        return self._l2
+
+    def domain_by_name(self, name):
+        return self._load_l2()["domains"].get(str(name).strip().casefold())
+
+    def vlan_by_key(self, domain_name, number):
+        return self._load_l2()["vlans"].get(
+            (str(domain_name).strip().casefold(), str(number))
+        )
+
+    def vrf_by_name(self, name, section_id):
+        """VRFs are keyed by (section, name), never by name alone.
+
+        phpIPAM puts no unique index on vrf.name, so the same name in two
+        sections is two separate records -- which is what keeps fan-in
+        safe. Matching on name alone would make every subordinate adopt
+        and overwrite the first site's VRF of that name.
+        """
+        wanted = str(name).strip().casefold()
+        section_id = str(section_id)
+        for raw in self._load_l2()["vrfs"]:
+            if str(raw.get("name") or "").strip().casefold() != wanted:
+                continue
+            listed = {
+                part.strip()
+                for part in str(raw.get("sections") or "").split(";")
+                if part.strip()
+            }
+            if section_id in listed:
+                return raw
+        return None
+
+    def vlan_ref_for_id(self, vlan_id):
+        """The (domain, number) a subnet's vlanId currently points at, or
+        None where it points at nothing."""
+        if str(vlan_id or "") in ("", "0", "None"):
+            return None
+        return self._load_l2()["vlan_ref_by_id"].get(str(vlan_id))
+
+    def vrf_name_for_id(self, vrf_id):
+        if str(vrf_id or "") in ("", "0", "None"):
+            return None
+        return self._load_l2()["vrf_name_by_id"].get(str(vrf_id))
+
+    def invalidate_l2(self):
+        self._l2 = None
 
     # -- Addresses -----------------------------------------------------
 
@@ -254,9 +340,34 @@ class Executor:
                     f"it top-level in the section instead"
                 )
 
-        self._client.create_subnet(
-            subnet=network, mask=prefix, section_id=section_id, **extra
-        )
+        try:
+            self._client.create_subnet(
+                subnet=network, mask=prefix, section_id=section_id, **extra
+            )
+        except PhpIpamError as exc:
+            # phpIPAM validates a new subnet against its siblings, and
+            # refuses one that overlaps them. The plan already detaches
+            # subnets it is about to re-nest, so reaching this means the
+            # overlapping subnet is staying where it is -- most often a
+            # new aggregate being added *above* existing top-level
+            # subnets, which phpIPAM will not accept while they are its
+            # siblings. Nothing this tool can reorder fixes that, so say
+            # so rather than surfacing a bare 409.
+            if "overlap" in str(exc).lower() or "nested subnet" in str(exc).lower():
+                raise TargetError(
+                    f"{exc}. phpIPAM refuses a subnet that overlaps one of "
+                    f"its siblings. {action.cidr} is new upstream and sits "
+                    f"above a subnet that already exists here at the same "
+                    f"level, so there is nowhere to move that one to first. "
+                    f"The fix is on the target: turn OFF 'strict mode' on "
+                    f"this section (Administration > Sections > edit), which "
+                    f"disables the overlap and nesting checks for it. That is "
+                    f"safe for a replicated section -- the hierarchy written "
+                    f"here is one the source instance already validated. "
+                    f"Otherwise, nest or remove the overlapping subnet by "
+                    f"hand; this tool does not touch the addresses in it."
+                )
+            raise
         # Confirm by natural key rather than trusting the POST's return.
         self._view.invalidate_subnets(section_id)
         if action.cidr not in self._view.subnets_by_cidr(section_id):
@@ -271,6 +382,196 @@ class Executor:
         self._client.update_subnet(
             subnet_id, **model.to_subnet_write_fields(action.detail)
         )
+
+    # -- L2 domains, VLANs and VRFs ------------------------------------
+
+    def _do_create_l2domain(self, action):
+        section_id = self._section_id(action.section)
+        self._client.create_l2domain(
+            action.detail["name"], sections=[section_id],
+            **{k: v for k, v in action.detail.items() if k != "name"}
+        )
+        self._view.invalidate_l2()
+        if not self._view.domain_by_name(action.detail["name"]):
+            raise TargetError(
+                f"created L2 domain {action.detail['name']!r} but it is not "
+                f"visible on re-read -- treating as a failed write"
+            )
+
+    def _do_update_l2domain(self, action):
+        domain = self._view.domain_by_name(action.key)
+        if not domain:
+            raise TargetError(f"L2 domain {action.key!r} vanished before update")
+        self._client.update_l2domain(domain["id"], **action.detail)
+        self._view.invalidate_l2()
+
+    def _do_attach_l2domain(self, action):
+        """Adds the target section to an existing domain's section list.
+
+        Additive on purpose: the domain may legitimately serve sections
+        this source knows nothing about, and a fan-in master will have
+        one domain per subordinate. Replacing the list would let each
+        import evict the others.
+        """
+        domain = self._view.domain_by_name(action.key)
+        if not domain:
+            raise TargetError(f"L2 domain {action.key!r} vanished before update")
+        section_id = str(self._section_id(action.section))
+        listed = {
+            part.strip()
+            for part in str(domain.get("sections") or "").split(";")
+            if part.strip()
+        }
+        listed.add(section_id)
+        self._client.update_l2domain(domain["id"], sections=sorted(listed))
+        self._view.invalidate_l2()
+
+    def _do_create_vlan(self, action):
+        domain_name = action.detail["domain"]
+        domain = self._view.domain_by_name(domain_name)
+        if not domain:
+            raise TargetError(
+                f"cannot create VLAN {action.detail.get('number')} -- its L2 "
+                f"domain {domain_name!r} is not present on the target"
+            )
+        fields = {k: v for k, v in action.detail.items()
+                  if k not in ("domain", "number", "name")}
+        self._client.create_vlan(
+            number=action.detail["number"],
+            name=action.detail.get("name") or "",
+            domain_id=domain["id"], **fields
+        )
+        self._view.invalidate_l2()
+        if not self._view.vlan_by_key(domain_name, action.detail["number"]):
+            raise TargetError(
+                f"created VLAN {action.detail['number']} in domain "
+                f"{domain_name!r} but it is not visible on re-read"
+            )
+
+    def _do_update_vlan(self, action):
+        vlan = self._view.vlan_by_key(action.detail["domain"],
+                                      action.detail["number"])
+        if not vlan:
+            raise TargetError(f"VLAN {action.key} vanished before update")
+        fields = {k: v for k, v in action.detail.items() if k != "domain"}
+        self._client.update_vlan(vlan["id"], **fields)
+        self._view.invalidate_l2()
+
+    def _do_create_vrf(self, action):
+        section_id = self._section_id(action.section)
+        fields = {k: v for k, v in action.detail.items() if k != "name"}
+        self._client.create_vrf(
+            name=action.detail["name"], sections=[section_id], **fields
+        )
+        self._view.invalidate_l2()
+        if not self._view.vrf_by_name(action.detail["name"], section_id):
+            raise TargetError(
+                f"created VRF {action.detail['name']!r} but it is not visible "
+                f"on re-read -- treating as a failed write"
+            )
+
+    def _do_update_vrf(self, action):
+        vrf = self._view.vrf_by_name(action.key, self._section_id(action.section))
+        if not vrf:
+            raise TargetError(f"VRF {action.key!r} vanished before update")
+        self._client.update_vrf(vrf["id"], **action.detail)
+        self._view.invalidate_l2()
+
+    def _do_link_subnet(self, action):
+        """Points a subnet at its VLAN and/or VRF.
+
+        Both are local ids, resolved here from the natural keys the
+        snapshot carries. Sent in one PATCH because phpIPAM accepts them
+        together and a subnet's VLAN and VRF change as a pair often
+        enough to be worth not doing twice.
+        """
+        section_id = self._section_id(action.section)
+        subnet_id = self._subnet_id(action.section, action.cidr)
+        fields = {}
+
+        if "vlan" in action.detail:
+            reference = action.detail["vlan"]
+            if reference is None:
+                fields["vlanId"] = 0
+            else:
+                vlan = self._view.vlan_by_key(reference["domain"],
+                                              reference["number"])
+                if not vlan:
+                    self._log(
+                        f"  NOTE   {action.cidr} wants VLAN "
+                        f"{reference['number']} in domain "
+                        f"{reference['domain']!r}, which is not on the target "
+                        f"-- leaving its VLAN as it is"
+                    )
+                else:
+                    fields["vlanId"] = vlan["id"]
+
+        if "vrf" in action.detail:
+            reference = action.detail["vrf"]
+            if reference is None:
+                fields["vrfId"] = 0
+            else:
+                vrf = self._view.vrf_by_name(reference["name"], section_id)
+                if not vrf:
+                    self._log(
+                        f"  NOTE   {action.cidr} wants VRF "
+                        f"{reference['name']!r}, which is not on the target "
+                        f"-- leaving its VRF as it is"
+                    )
+                else:
+                    fields["vrfId"] = vrf["id"]
+
+        if not fields:
+            return
+        self._client.update_subnet(subnet_id, **fields)
+        self._view.invalidate_subnets(section_id)
+
+    def _do_detach_subnet(self, action):
+        """Moves a subnet temporarily to the top level of its section, so
+        that a subnet it is about to be nested under can be created.
+
+        phpIPAM validates overlap on create against the new subnet's
+        siblings, so an existing /24 has to stop being a sibling before
+        the /22 that will contain it can exist. The matching
+        reparent_subnet immediately follows in the same plan. If a run
+        dies in between, the subnet is left top-level and the next run
+        plans the move again -- the comparison is against the snapshot,
+        not against what this run intended.
+        """
+        section_id = self._section_id(action.section)
+        subnet_id = self._subnet_id(action.section, action.cidr)
+        self._client.update_subnet(subnet_id, masterSubnetId=0)
+        self._view.invalidate_subnets(section_id)
+
+    def _do_reparent_subnet(self, action):
+        """Moves an existing subnet under a different parent, or out to
+        the top level of its section.
+
+        Kept separate from _do_update_subnet because the value written is
+        a *local* id that has to be resolved here, at apply time, from
+        the parent's CIDR -- the plan cannot know it, and the parent may
+        itself have been created earlier in this same run.
+        """
+        section_id = self._section_id(action.section)
+        subnet_id = self._subnet_id(action.section, action.cidr)
+
+        parent_cidr = action.detail.get("master_subnet")
+        if parent_cidr:
+            parent = self._view.subnets_by_cidr(section_id).get(parent_cidr)
+            if not parent:
+                self._log(
+                    f"  NOTE   {action.cidr} moved under {parent_cidr} on the "
+                    f"source, which is not present on the target -- leaving it "
+                    f"where it is"
+                )
+                return
+            new_parent_id = parent["id"]
+        else:
+            # phpIPAM spells "top level of the section" as 0, not null.
+            new_parent_id = 0
+
+        self._client.update_subnet(subnet_id, masterSubnetId=new_parent_id)
+        self._view.invalidate_subnets(section_id)
 
     def _do_create_address(self, action):
         subnet_id = self._subnet_id(action.section, action.cidr)

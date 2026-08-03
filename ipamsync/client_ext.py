@@ -42,14 +42,37 @@ from phpipam_client import PhpIpamClient, PhpIpamError
 class SyncPhpIpamClient(PhpIpamClient):
     """PhpIpamClient plus section creation and empty-collection handling."""
 
-    @staticmethod
-    def _is_empty_collection(error):
+    #: How phpIPAM words "this collection is empty". It does not use one
+    #: phrase: subnets and addresses report "No ... found", while VLANs
+    #: and VRFs report "No ... configured". Both confirmed on 1.8.1:
+    #:
+    #:     GET subnets/11/addresses/ -> 404 "No addresses found"
+    #:     GET vlans/                -> 404 "No vlans configured"
+    #:     GET vrfs/                 -> 404 "No vrfs configured"
+    #:
+    #: Matching only the first wording meant every import into a master
+    #: with no VLANs yet -- i.e. every master before its first run --
+    #: died on the read instead of treating it as empty.
+    EMPTY_COLLECTION_ENDINGS = ("found", "configured")
+
+    @classmethod
+    def _is_empty_collection(cls, error):
         """True for phpIPAM's "this collection is empty" 404, false for
-        every other 404 (bad id, unknown endpoint, no permission)."""
+        every other 404 (bad id, unknown endpoint, no permission).
+
+        Deliberately still narrow: it must not swallow "that subnet does
+        not exist", or the importer would write records against an id
+        that was never there.
+        """
         if error.status_code != 404:
             return False
         message = str(error).lower()
-        return "no " in message and " found" in message
+        if "no " not in message:
+            return False
+        return any(
+            message.rstrip(". ").endswith(ending)
+            for ending in cls.EMPTY_COLLECTION_ENDINGS
+        )
 
     def _read_collection(self, method, *args, **kwargs):
         """Runs a collection read, returning [] where phpIPAM reports the
@@ -69,6 +92,20 @@ class SyncPhpIpamClient(PhpIpamClient):
 
     def get_addresses_in_subnet(self, subnet_id):
         return self._read_collection(super().get_addresses_in_subnet, subnet_id)
+
+    # An instance with no VLANs or VRFs at all is completely ordinary --
+    # and is exactly the state of a master before its first import -- so
+    # these need the same empty-collection handling as the rest.
+    # Confirmed on 1.8.1: GET vlans/ -> 404 "No vlans configured",
+    # GET vrfs/ -> 404 "No vrfs configured".
+    def get_l2domains(self):
+        return self._read_collection(super().get_l2domains)
+
+    def get_vlans(self):
+        return self._read_collection(super().get_vlans)
+
+    def get_vrfs(self):
+        return self._read_collection(super().get_vrfs)
 
     def create_section(self, name, **fields):
         """Creates a section and returns whatever phpIPAM reports as the

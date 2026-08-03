@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ipamsync.plan import build_plan, canonicalise_document_cidr  # noqa: E402
-from ipamsync.snapshot import find_stale_files, read_snapshot  # noqa: E402
+from ipamsync.snapshot import (  # noqa: E402
+    SCHEMA_VERSION, find_stale_files, partition_documents, read_snapshot,
+)
 from test_plan import FakeTarget, config  # noqa: E402
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "snapshot"
@@ -32,7 +34,8 @@ class TestExampleSnapshot(unittest.TestCase):
         # read_snapshot verifies every checksum and the schema version,
         # so simply getting here proves the committed files are intact
         # and internally consistent.
-        cls.manifest, cls.documents = read_snapshot(EXAMPLES)
+        cls.manifest, all_documents = read_snapshot(EXAMPLES)
+        cls.documents, cls.section_docs = partition_documents(all_documents)
         cls.by_cidr = {d["cidr"]: d for d in cls.documents}
 
     def test_snapshot_is_intact_and_complete(self):
@@ -100,7 +103,7 @@ class TestExampleSnapshot(unittest.TestCase):
 
     def test_ipv6_is_represented_identically(self):
         document = self.by_cidr["2001:db8:5::/64"]
-        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(document["schema_version"], SCHEMA_VERSION)
         self.assertEqual(len(document["addresses"]), 1)
 
     def test_no_database_ids_anywhere(self):
