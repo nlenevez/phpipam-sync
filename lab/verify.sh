@@ -22,16 +22,24 @@
 #   1. the exporter never writes (its API app is read-only)
 #   2. only the configured section is replicated
 #   3. records land on the replica with the replica's OWN ids
-#   4. subnet nesting is rebuilt from the parent CIDR, not the parent id
+#   4. every relationship is rebuilt from a natural key, never an id:
+#      subnet nesting from the parent CIDR, a folder from its path, a
+#      VLAN from (domain, number), a VRF from (section, name)
 #   5. a dry run writes nothing
 #   6. a steady-state re-run writes nothing (cron-safe)
 #   7. changes propagate as minimal field-level updates
 #   8. deletions upstream and local records on the replica both survive
 #   9. custom fields and IPv6 replicate
-#  9b. a subnet re-parented upstream is re-parented on the replica,
-#      including the case where the new parent is created in the same run
-#  10. --delete makes it a strict mirror, and the safety limit stops a
-#      snapshot that would wipe the replica
+#  10. structural moves propagate: a subnet re-parented, moved between
+#      VLANs, or moved in or out of a folder, including when the new
+#      parent is created in the same run
+#  11. folders, VLANs and VRFs replicate in their own right, unattached
+#      ones included
+#  12. --delete makes it a strict mirror -- for folders, VLANs and VRFs
+#      as well as subnets and addresses -- while never touching a VLAN
+#      in a domain shared with another section
+#  13. the safety limit stops a snapshot that would wipe the replica, and
+#      a corrupted snapshot is refused outright
 
 set -uo pipefail
 cd "$(dirname "$0")"

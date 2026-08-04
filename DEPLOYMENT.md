@@ -12,10 +12,11 @@ read-only master over one-way git mirroring.
                                                                              to users)
 ```
 
-Everything below was verified against phpIPAM **1.8.1** (also 1.7.4). If
-you run something else, read [Before you start](#before-you-start) —
-phpIPAM's API differs between versions in ways that break this tool, and
-the checks there are how you find out cheaply.
+Everything below was verified against phpIPAM **1.8.1**, which is the
+only version this targets. If you run something else, read
+[Before you start](#before-you-start) — phpIPAM's API differs between
+versions in ways that break this tool, and the checks there are how you
+find out cheaply.
 
 **Contents**
 
@@ -53,13 +54,15 @@ the checks there are how you find out cheaply.
 **Enable the API** on every instance: Administration → phpIPAM settings →
 API = On. Without it every call returns `503 "API server disabled"`.
 
-**Prove your version behaves.** Two of the four bugs found building this
-were version-specific API quirks. Before deploying, run the lab against
-your version:
+**Prove your version behaves.** This tool targets **1.8.1**. Seven of
+the behaviours it depends on are undocumented API quirks found only by
+running against a real instance, so anything else is unverified rather
+than merely untested. Before deploying, run the lab against your
+version:
 
 ```bash
 cd lab
-PHPIPAM_VERSION=v1.8.1 ./setup.sh     # use YOUR version tag
+PHPIPAM_VERSION=v1.8.1 ./setup.sh     # the version this targets
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
 ./verify.sh && ./verify-fanin.sh
@@ -74,6 +77,12 @@ output names what differs — do not deploy until it is understood.
 ## Part 1 — each subordinate
 
 Repeat for every site. Nothing here differs between them except names.
+
+> **If the data currently exists only on the master** and these instances
+> are empty, seed each one first — see [FILL.md](FILL.md). It runs the
+> same two scripts in the opposite direction, once per section, and ends
+> with the check that the first forward sync is a no-op. Come back here
+> afterwards.
 
 ### 1.1 Create the API app (read-only)
 
@@ -836,6 +845,103 @@ Do not do this while `delete_drift` is on unless you have re-cloned the
 master's copy first — a half-transferred fresh history could look like a
 mass deletion. (The delete safety limit would refuse it, which is exactly
 what it is for, but do not rely on that as the plan.)
+
+---
+
+## Upgrading across a schema change
+
+The snapshot format carries a `schema_version`, and the importer refuses
+a version it does not recognise. That refusal is a feature: a format it
+cannot read may describe records it would otherwise write wrongly, and
+pausing is always recoverable where a bad write is not.
+
+| Version | What it added |
+|---|---|
+| 1 | sections, subnets, addresses |
+| 2 | `kind` on every document; `_section.json` per section holding L2 domains, VLANs and VRFs; VLAN/VRF references on subnets |
+| 3 | `folders` in the section document, `parent_folder` on subnets |
+
+### Why it must be lockstep
+
+An **added** key is not backward compatible in the direction that
+matters. An exporter that does not write `folders` produces a snapshot
+where a newer importer reads *"this section has no folders"* rather than
+*"this exporter had nothing to say about folders"*. Those are the same
+bytes and opposite meanings, and with strict mirror on the first one
+means **delete every folder on the master** — moving each subnet inside
+them out to the top of the section on the way.
+
+The version check is what makes that impossible. Nothing else would
+catch it, which is why a mixed pair must never be allowed to apply.
+
+### The order, and what happens meanwhile
+
+**Upgrade the master first, then each subordinate.** An upgraded
+subordinate writes the new format immediately, so an old master would
+refuse it; doing the master first means each subordinate starts applying
+the moment it is upgraded.
+
+Replication pauses per site until both ends match. **Nothing is lost in
+the meantime**: the mirror keeps delivering commits, and this tool is
+state-based — the importer reads the tree at `HEAD` and reconciles the
+difference, so a site upgraded a week later catches up in a single run
+rather than replaying a week of history. That is the same property that
+covers a mirror outage (see [When the mirror fails and then catches
+up](#when-the-mirror-fails-and-then-catches-up)).
+
+```bash
+# 1. master
+cd /opt/phpipam-sync && git pull && pip install -r requirements.txt
+./ipam_import.py --config config.master.yml --pull      # dry run: expect a
+                                                        # schema_version error
+                                                        # per site, nothing tried
+
+# 2. one subordinate, then confirm the master applies it
+cd /opt/phpipam-sync && git pull && pip install -r requirements.txt
+./ipam_export.py --config config.yml --out-dir /srv/ipam-data --commit --push
+
+# on the master -- this site should now plan normally
+./ipam_import.py --config config.master.yml --source site-a --pull
+
+# 3. the rest
+```
+
+### Before the first version 3 import
+
+Version 3 replicates objects earlier versions did not, and two of them
+need something to exist on the master first:
+
+- **An L2 domain per section** (Administration → VLAN → L2 domains),
+  scoped to that site's section. VLANs land in the domain the snapshot
+  names. Anything a site leaves in the shared `default` domain still
+  replicates, but is never deleted — see the table in
+  [Part 5](#part-5--switching-to-strict-mirror-later).
+- **Strict mode OFF** on each replicated section (Part 2.1). Folders and
+  re-parenting both create subnets in positions phpIPAM's overlap check
+  can refuse.
+
+### Turn strict mirror off for the upgrade
+
+If `delete_drift` is already on, set it to `false` until every site is
+upgraded and has run at least once cleanly. The first version 3 import
+for a site brings across folders, VLANs and VRFs that were never
+replicated before, and it is worth seeing that as a list of creates in a
+dry run before the same run is also allowed to delete. Turn it back on
+afterwards.
+
+### Afterwards
+
+Confirm on the master, per site:
+
+```bash
+./ipam_import.py --config config.master.yml --source site-a --pull
+# expect: changes: none
+```
+
+A second run reporting `changes: none` is the real confirmation — it
+means the new object types round-tripped and nothing is churning.
+
+---
 
 ## Runbook
 

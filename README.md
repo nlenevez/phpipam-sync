@@ -29,6 +29,10 @@ makes it work across an air gap.
 step-by-step procedure, cron, monitoring, and a runbook of every error
 this can produce. This README is the *what and why*; that is the *how*.
 
+📗 **Data only on the master, and the sources are empty?**
+[FILL.md](FILL.md) covers the one-off seed in the opposite direction —
+one section per instance — before the normal sync is switched on.
+
 **Contents**
 
 - [Status](#status)
@@ -54,9 +58,9 @@ this can produce. This README is the *what and why*; that is the *how*.
 ## Status
 
 Run end to end against **real phpIPAM instances** with independent
-databases and deliberately diverged id counters. Verified on **1.8.1**
-(primary) and **1.7.4**. Subnet and address field sets are identical
-between those two versions.
+databases and deliberately diverged id counters. Verified on **1.8.1**,
+which is the only version this targets — see
+[Other versions](#other-versions).
 
 `lab/` builds three throwaway instances in Docker so the result is
 reproducible rather than a claim:
@@ -69,18 +73,22 @@ export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
 ./verify-fanin.sh     # many-to-one fan-in     -- 22 assertions
 ./verify-catchup.sh   # mirror-outage recovery -- 14 assertions
 docker compose down
-
-PHPIPAM_VERSION=v1.7.4 ./verify.sh          # or any published tag
 ```
 
 Plus **189 unit/integration tests** needing no network, phpIPAM, or
 credentials. CI runs them on every push.
 
+### Other versions
+
+**This targets phpIPAM 1.8.1 and nothing else.** Every behaviour below
+was established against it, and seven of them were things the API
+documentation does not say — so a different version is not a
+lower-confidence deployment, it is an unverified one. The lab is how you
+would change that: point it at your tag and read what fails.
+
 ### What is not proven
 
-The lab covers 1.8.1 and 1.7.4. Other versions may differ in exactly the
-ways that produced the bugs below. On first contact with your own
-instances:
+Even on 1.8.1, on first contact with your own instances:
 
 1. Run the importer **without `--apply`** — it writes nothing and prints
    the exact plan.
@@ -178,18 +186,21 @@ gateway flag, ping/PTR flags) — plus **custom fields** on both. IPv4 and
 IPv6 alike.
 
 **Also replicated: folders, L2 domains, VLANs and VRFs**, and each
-subnet's link to them. A phpIPAM folder is a `subnets` row with
-`isFolder=1` and no network of its own, named by its `description`;
-folders replicate by **path** (a list of names, since a folder name may
-itself contain a slash), empty ones included, and a subnet inside one
-lands inside it on the target. These are carried as records in their own right, so a VLAN or
-VRF defined upstream but attached to nothing still appears on the target
-— defining one is a deliberate act at the source, and a one-way link
-gives the target no way to ask for it later. Their natural keys are a
-domain by **name**, a VLAN by **(domain, number)**, and a VRF by
-**(section, name)**; phpIPAM has no unique index on any of them, so the
-same VLAN number in two domains, or the same VRF name in two sections,
-are genuinely separate records. That is what keeps fan-in safe.
+subnet's link to them. All four are carried as records in their own
+right, so one defined upstream but attached to nothing still appears on
+the target — defining it was a deliberate act at the source, and a
+one-way link gives the target no way to ask for it later.
+
+A phpIPAM folder is a `subnets` row with `isFolder=1` and no network of
+its own, named by its `description`. Folders replicate by **path** — a
+list of names, since a folder name may itself contain a slash — and a
+subnet inside one lands inside it on the target.
+
+The natural keys are: a folder by **path**, a domain by **name**, a VLAN
+by **(domain, number)**, a VRF by **(section, name)**. phpIPAM has no
+unique index on any of them, so the same VLAN number in two domains, or
+the same VRF name in two sections, are genuinely separate records — which
+is what keeps fan-in safe.
 
 Scoping follows phpIPAM's own rule rather than anything this tool
 invents: a VLAN belongs to a section through its L2 domain
@@ -675,6 +686,7 @@ section-collision guard.
 | `config.example.yml` | Source / 1:1 configuration |
 | `config.master.example.yml` | Master (fan-in) configuration |
 | `DEPLOYMENT.md` | Step-by-step setup, cron, monitoring, runbook |
+| `FILL.md` | One-off seeding of the sources from the master, per section |
 | `examples/` | A real snapshot, annotated — verified by the tests |
 | `lab/` | Three phpIPAM instances in Docker + `verify.sh` (1:1), `verify-fanin.sh`, `verify-catchup.sh`, `measure-growth.py` |
 

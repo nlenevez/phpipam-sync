@@ -71,8 +71,8 @@ one) — plus an IPv6 `/64` and its gateway. Both were previously listed as
 Every one of these was invisible to a test suite built on a fake, because
 the fake behaved the way phpIPAM's API *documentation* implies.
 
-Verified on **1.8.1** and **1.7.4**; the first two behaviours are
-identical on both, so neither fix is a version-specific workaround.
+All of them were established against **1.8.1**, which is the only
+version this tool targets.
 
 ### 1. Empty collections are a 404, not an empty list
 
@@ -242,16 +242,14 @@ seven failures at once instead of dying on the first.
 
 ## Running against a different version
 
-The image tag is pinned to `v1.8.1` but overridable, because the bugs
-above were all version-specific API behaviours — being able to re-verify
-against whatever you actually run matters more than testing one blessed
-version:
+The image tag is pinned to `v1.8.1`, which is what this tool targets and
+what every behaviour above was established against. It is overridable, so
+if you ever need to qualify another version the lab is how you would do
+it — not by reading the code and hoping:
 
 ```bash
-PHPIPAM_VERSION=v1.7.4 ./verify.sh
+PHPIPAM_VERSION=v1.9.0 ./verify.sh          # any published tag
 ```
-
-Verified on 1.8.1 and 1.7.4.
 
 ## What the lab still does not prove
 

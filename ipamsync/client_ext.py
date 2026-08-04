@@ -16,8 +16,8 @@ why that is off by default.
 
 ## Empty collections are an error in phpIPAM, not an empty list
 
-Confirmed against phpIPAM 1.8.1 and 1.7.4 (docker
-`phpipam/phpipam-www`): a collection endpoint with nothing in it returns
+Confirmed against phpIPAM 1.8.1 (docker `phpipam/phpipam-www`), the
+version this tool targets: a collection endpoint with nothing in it returns
 **HTTP 404 with a "No ... found" message**, not `200` with `[]`:
 
     GET /api/sync/subnets/11/addresses/  -> 404 {"message": "No addresses found"}

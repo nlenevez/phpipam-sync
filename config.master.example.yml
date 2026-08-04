@@ -80,6 +80,14 @@ options:
   # Once proven, setting this true makes the master an exact mirror --
   # which also enforces "users never enter data into the master", since
   # anything created by hand is removed on the next sync.
+  #
+  # Deletion covers subnets, addresses, folders, VLANs and VRFs -- but
+  # VLANs and VRFs only where they are scoped to ONE section. A VLAN in
+  # the `default` L2 domain, or in a domain shared between sections, is
+  # reported as drift and never deleted: domain 1 belongs to every
+  # section implicitly, so on a fan-in master such a VLAN cannot be
+  # attributed to one site. Give each site its own L2 domain if you want
+  # its VLANs reconciled. See DEPLOYMENT.md Part 5.
   delete_drift: false
 
   delete_limit_fraction: 0.1
