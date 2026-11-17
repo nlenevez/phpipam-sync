@@ -1,0 +1,18 @@
+# Tests need no network, phpIPAM instance or credentials.
+stages:
+  - test
+
+unit-tests:
+  stage: test
+  tags:
+    - network-jump
+  before_script:
+    # venv: works on shell runners (PEP 668 refuses a bare pip install) and docker runners.
+    - python3 -m venv .ci-venv
+    - .ci-venv/bin/pip install --quiet --upgrade pip
+    - .ci-venv/bin/pip install --quiet -r requirements.txt
+  script:
+    - .ci-venv/bin/python -m unittest discover -s tests -v
+    - sh -n contrib/export.sh
+  after_script:
+    - rm -rf .ci-venv

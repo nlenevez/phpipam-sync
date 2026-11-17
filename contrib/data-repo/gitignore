@@ -1,0 +1,3 @@
+# Copy to .gitignore in a data repo. Tokens never go in git.
+*.env
+.env*

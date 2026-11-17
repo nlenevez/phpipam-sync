@@ -1,0 +1,68 @@
+# phpipam-sync MASTER configuration (fan-in).
+#
+#   site-a  ──(site-a-ipam.git, mirrored)──┐
+#   site-b  ──(site-b-ipam.git, mirrored)──┤
+#   site-c  ──(site-c-ipam.git, mirrored)──┼──▶  MASTER phpIPAM
+#   site-d  ──(site-d-ipam.git, mirrored)──┤     (read-only to users)
+#   site-e  ──(site-e-ipam.git, mirrored)──┘
+#
+# Each subordinate exports with config.example.yml to its own repo. The
+# master imports all of them with this file:
+#
+#     ./ipam_import.py --config config.master.yml --pull            # dry run
+#     ./ipam_import.py --config config.master.yml --pull --apply    # for real
+#     ./ipam_import.py --config config.master.yml --source site-c   # just one
+#
+# A failing source is reported and skipped. Exit 1 if any source failed,
+# 2 if individual records failed.
+
+# -- The master: the only instance written to ---------------------------
+target:
+  base_url: https://ipam-master.example.com
+  app_id: sync
+  token_env: PHPIPAM_MASTER_TOKEN
+  verify_ssl: true
+  timeout: 30
+
+# -- The subordinates ---------------------------------------------------
+#
+# EACH SUBORDINATE MUST OWN ITS OWN SECTION ON THE MASTER. Records in a
+# target section absent from that source's snapshot are drift, deleted
+# once delete_drift is on; a shared section lets one site delete
+# another's networks. The loader refuses two sources on one section.
+#
+#   name:         label for logs and --source
+#   snapshot_dir: local working copy of that subordinate's mirrored repo
+#   sections:     section name(s) AS EXPORTED by that subordinate
+#   section_map:  where they land on this master -- one section per site
+sources:
+  - name: site-a
+    snapshot_dir: /srv/ipam/site-a-ipam
+    sections: [Networks]
+    section_map: {Networks: Site-A}
+
+  - name: site-b
+    snapshot_dir: /srv/ipam/site-b-ipam
+    sections: [Networks]
+    section_map: {Networks: Site-B}
+
+  - name: site-c
+    snapshot_dir: /srv/ipam/site-c-ipam
+    sections: [Networks]
+    section_map: {Networks: Site-C}
+
+  # ... one block per subordinate.
+
+options:
+  # Options are described in config.example.yml.
+  sync_tags: true
+
+  # Keep false: create the master's sections by hand with permissions.
+  create_missing_sections: false
+
+  # Start false; enable after the drift reports show no cross-site
+  # records. VLANs in the default or a shared L2 domain are never
+  # deleted. See DEPLOYMENT.md Part 5.
+  delete_drift: false
+
+  delete_limit_fraction: 0.1

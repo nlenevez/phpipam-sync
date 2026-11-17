@@ -1,0 +1,5 @@
+# Create the real file encrypted:  ansible-vault create vault.yml
+# One API app token per instance name; "default" covers the rest.
+vault_phpipam_tokens:
+  default: change-me
+  site-b: change-me-too

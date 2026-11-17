@@ -1,0 +1,98 @@
+---
+# Export every phpIPAM instance in phpipam_export_instances, tokens from a vault.
+#
+#   ansible-playbook -i inventory.yml phpipam-export.yml --vault-password-file ~/.ipam-vault-pass
+#
+# Per instance: clone the data repo if missing, then run
+# tool/contrib/export.sh. Every instance is attempted; the play fails at the
+# end if any failed.
+- name: phpIPAM export to git
+  hosts: phpipam_export
+  gather_facts: false
+
+  vars_files:
+    - "{{ phpipam_export_vault_file | default(playbook_dir + '/vault.yml') }}"
+
+  # Defaults are inline (| default): play vars would override the inventory.
+  tasks:
+    - name: Token exists for every instance
+      ansible.builtin.assert:
+        that: (vault_phpipam_tokens[item.name] | default(vault_phpipam_tokens.default | default(''))) | length > 0
+        fail_msg: "no vault_phpipam_tokens entry for {{ item.name }} (and no default)"
+        quiet: true
+      loop: "{{ phpipam_export_instances }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Data repo is cloned
+      ansible.builtin.git:
+        repo: "{{ item.repo }}"
+        dest: "{{ item.path }}"
+        version: "{{ item.branch | default('main') }}"
+        recursive: true
+        update: false
+        accept_hostkey: false
+        key_file: "{{ phpipam_export_ssh_key | default(omit, true) }}"
+      loop: "{{ phpipam_export_instances | selectattr('repo', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # The token goes to the script in a 0600 env file, not via `environment:`,
+    # which -vvv prints and `ps` shows.
+    - name: Export
+      block:
+        - name: Private directory for token files
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: .ipam-export
+          register: phpipam_export_tmp
+
+        - name: Token file per instance
+          ansible.builtin.copy:
+            dest: "{{ phpipam_export_tmp.path }}/{{ item.name }}.env"
+            mode: "0600"
+            content: |
+              {{ item.token_env | default('PHPIPAM_SRC_TOKEN') }}={{ (vault_phpipam_tokens[item.name] | default(vault_phpipam_tokens.default)) | quote }}
+          loop: "{{ phpipam_export_instances }}"
+          loop_control:
+            label: "{{ item.name }}"
+          no_log: true
+
+        - name: Run export
+          ansible.builtin.command:
+            argv:
+              - "{{ item.path }}/tool/contrib/export.sh"
+              - "{{ phpipam_export_tmp.path }}/{{ item.name }}.env"
+            chdir: "{{ item.path }}"
+          environment:
+            PYTHON: "{{ item.python | default(phpipam_export_python | default('/usr/bin/python3')) }}"
+            EXPORT_REMOTE: "{{ item.remote | default('origin') }}"
+            GIT_SSH_COMMAND: "ssh -o BatchMode=yes{{ (' -i ' + phpipam_export_ssh_key) if phpipam_export_ssh_key | default('') else '' }}"
+          loop: "{{ phpipam_export_instances }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: phpipam_export_runs
+          failed_when: false
+          changed_when: "'committed' in phpipam_export_runs.stdout | default('') + phpipam_export_runs.stderr | default('')"
+      always:
+        - name: Remove token files
+          ansible.builtin.file:
+            path: "{{ phpipam_export_tmp.path }}"
+            state: absent
+          when: phpipam_export_tmp.path is defined
+
+    - name: Output
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines + item.stderr_lines }}"
+      loop: "{{ phpipam_export_runs.results }}"
+      loop_control:
+        label: "{{ item.item.name }}: {{ 'ok' if item.rc == 0 else 'FAILED' }}"
+
+    - name: All instances exported cleanly
+      ansible.builtin.assert:
+        that: bad | length == 0
+        fail_msg: "failed: {{ bad | join(', ') }}"
+        success_msg: "all {{ phpipam_export_runs.results | length }} instance(s) ok"
+      vars:
+        bad: "{{ phpipam_export_runs.results | rejectattr('rc', 'equalto', 0) | map(attribute='item.name') | list }}"

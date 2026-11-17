@@ -1,0 +1,23 @@
+{
+  "address_count": 5,
+  "dropped_source_fields": {},
+  "exported_at": "2026-08-03T04:33:41Z",
+  "files": {
+    "sections/shared/10.20.0.0_16.json": "a164e30d9013f11f9d7b0d8f6784eb2a31dcef117546673c928bc69776213cf2",
+    "sections/shared/10.20.5.0_24.json": "3f506f1e924ca9eedef79eca021e192604c8a42974d3744811aa1cccfbd146a7",
+    "sections/shared/10.30.0.0_24.json": "2ca3d580193414c0de9bf9b9420981bd2282c5070d932fe1739f57196b1990d3",
+    "sections/shared/2001-db8-5--_64.json": "eb338a00d0d88f9b4a2264a209da60604461ad308a31adfc0316fd3d65d78f54",
+    "sections/shared/_section.json": "aeb2e4b45adf7e504fc47e4bcf85ba1a02f57c80e333a0dcc0c5bdc178d79f2b"
+  },
+  "schema_version": 3,
+  "sections": [
+    "Shared"
+  ],
+  "source": {
+    "app_id": "sync",
+    "base_url": "https://127.0.0.1:8443"
+  },
+  "subnet_count": 4,
+  "vlan_count": 3,
+  "vrf_count": 2
+}

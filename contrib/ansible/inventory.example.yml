@@ -1,0 +1,18 @@
+# Copy to inventory.yml. The export host runs the play against itself.
+all:
+  children:
+    phpipam_export:
+      hosts:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: /usr/bin/python3.12
+      vars:
+        phpipam_export_python: /usr/bin/python3.12
+        phpipam_export_ssh_key: /home/ipam-export/.ssh/ipam_export
+        phpipam_export_instances:
+          - name: site-a                  # key in vault_phpipam_tokens
+            path: /srv/ipam/site-a
+            repo: ssh://git@bitbucket.example.net:7999/ipam/site-a-ipam.git   # optional: cloned if missing
+          - name: site-b
+            path: /srv/ipam/site-b
+            token_env: PHPIPAM_SRC_TOKEN  # optional: must match source.token_env

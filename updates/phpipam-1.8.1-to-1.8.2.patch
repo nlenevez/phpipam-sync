@@ -1,0 +1,1151 @@
+diff -Naur a/api/controllers/Common.php b/api/controllers/Common.php
+--- a/api/controllers/Common.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/controllers/Common.php	2026-08-17 05:53:21.000000000 +1000
+@@ -163,8 +163,11 @@
+ 
+ 	/**
+ 	 * Provide default REQUEST_METHODs
+-	 *
++	 * @return string
+ 	 */
++	protected function request_method() {
++		return strtoupper((string) $_SERVER['REQUEST_METHOD']);
++	}
+ 
+ 	private function NOT_IMPLEMENTED() {
+ 		return array("code"=>501, "message"=>"Method not implemented");
+@@ -832,14 +835,14 @@
+ 		if($this->_params->controller=="subnets" )  								  { $this->keys['ip'] = "ip_addr"; }
+ 
+ 		// special keys for POST / PATCH
+-		if ($_SERVER['REQUEST_METHOD']=="POST" || $_SERVER['REQUEST_METHOD']=="PATCH") {
++		if (in_array($this->request_method(), ["POST", "PUT", "PATCH"])) {
+ 		if($this->_params->controller=="circuits")   								  { $this->keys['cid'] 		= "circuit_id"; }
+ 		}
+ 
+ 		// POST / PATCH / DELETE
+-		if ($_SERVER['REQUEST_METHOD']=="POST" || $_SERVER['REQUEST_METHOD']=="PATCH" || $_SERVER['REQUEST_METHOD']=="DELETE")		{ return $this->remap_update_keys (); }
++		if (in_array($this->request_method(), ["POST", "PUT", "PATCH", "DELETE"]))		{ return $this->remap_update_keys (); }
+ 		// GET
+-		elseif ($_SERVER['REQUEST_METHOD']=="GET")											{ return $this->remap_result_keys ($result); }
++		elseif (in_array($this->request_method(), ["GET", "HEAD"]))						{ return $this->remap_result_keys ($result); }
+ 	}
+ 
+ 	/**
+diff -Naur a/api/controllers/Devices.php b/api/controllers/Devices.php
+--- a/api/controllers/Devices.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/controllers/Devices.php	2026-08-17 05:53:21.000000000 +1000
+@@ -326,19 +326,19 @@
+ 	 */
+ 	private function validate_device_edit () {
+ 		// delete checks
+-		if($_SERVER['REQUEST_METHOD']=="DELETE") {
++		if($this->request_method()=="DELETE") {
+ 			// ID must be numeric
+ 			if(!is_numeric($this->_params->id))												{ $this->Response->throw_exception(400, "Invalid device id"); }
+ 			// check that device exists
+ 			if($this->Admin->fetch_object ("devices", "id", $this->_params->id)===false)	{ $this->Response->throw_exception(404, "Device does not exist"); }
+ 		}
+ 		// create checks
+-		elseif ($_SERVER['REQUEST_METHOD']=="POST") {
++		elseif ($this->request_method()=="POST") {
+ 			// name must be present
+ 			if(@$this->_params->hostname == "" || !isset($this->_params->hostname))			{ $this->Response->throw_exception(400, "Hostname is mandatory"); }
+ 		}
+ 		// update checks
+-		elseif ($_SERVER['REQUEST_METHOD']=="PATCH") {
++		elseif ($this->request_method()=="PATCH") {
+ 			// ID must be numeric
+ 			if(!is_numeric($this->_params->id))												{ $this->Response->throw_exception(400, "Invalid device id"); }
+ 			// name cannot be nothing
+diff -Naur a/api/controllers/L2domains.php b/api/controllers/L2domains.php
+--- a/api/controllers/L2domains.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/controllers/L2domains.php	2026-08-17 05:53:21.000000000 +1000
+@@ -241,9 +241,9 @@
+ 	 */
+ 	private function validate_domain_edit () {
+ 		// delete checks
+-		if($_SERVER['REQUEST_METHOD']=="DELETE") {
++		if($this->request_method()=="DELETE") {
+ 			// we cannot delete default domain
+-			if(@$this->_params->id==1 && $_SERVER['REQUEST_METHOD']=="DELETE")				{ $this->Response->throw_exception(409, "Default domain cannot be deleted"); }
++			if(@$this->_params->id==1 && $this->request_method()=="DELETE")				{ $this->Response->throw_exception(409, "Default domain cannot be deleted"); }
+ 			// ID must be numeric
+ 			if(!is_numeric($this->_params->id))												{ $this->Response->throw_exception(400, "Domain id must be numeric"); }
+ 			// check that it exists
+@@ -251,12 +251,12 @@
+ 																							{ $this->Response->throw_exception(404, "Invalid domain id"); }
+ 		}
+ 		// create checks
+-		elseif ($_SERVER['REQUEST_METHOD']=="POST") {
++		elseif ($this->request_method()=="POST") {
+ 			// name must be present
+ 			if(@$this->_params->name == "" || !isset($this->_params->name)) 				{ $this->Response->throw_exception(400, "Domain name is mandatory"); }
+ 		}
+ 		// update checks
+-		elseif ($_SERVER['REQUEST_METHOD']=="PATCH") {
++		elseif ($this->request_method()=="PATCH") {
+ 			// ID must be numeric
+ 			if(!is_numeric($this->_params->id))												{ $this->Response->throw_exception(400, "Invalid domain id"); }
+ 			// name must be present
+diff -Naur a/api/controllers/Nat.php b/api/controllers/Nat.php
+--- a/api/controllers/Nat.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/controllers/Nat.php	2026-08-17 05:53:21.000000000 +1000
+@@ -246,7 +246,7 @@
+      * @return void
+      **/
+     private function validate_nat_edit() {
+-        if ($_SERVER['REQUEST_METHOD']=="PATCH" || $_SERVER['REQUEST_METHOD']=="DELETE") {
++        if (in_array($this->request_method(), ["PATCH", "DELETE"])) {
+             if (!isset($this->_params->id) || !is_numeric($this->_params->id)) {
+                 $this->Response->throw_exception(400, "Invalid ID format");
+             }
+@@ -254,7 +254,7 @@
+                 $this->Response->throw_exception(404, "ID not found");
+             }
+         }
+-        if ($_SERVER['REQUEST_METHOD']=="POST" || $_SERVER['REQUEST_METHOD']=="PATCH") {
++        if (in_array($this->request_method(), ["POST", "PATCH"])) {
+             # Check optional fields format
+             # TBD: subnets for src & dst ?
+             foreach (array("src_port", "dst_port") as  $k) {
+@@ -268,7 +268,7 @@
+             $this->verify_device();
+ 
+         }
+-        if ($_SERVER['REQUEST_METHOD']=="POST") {
++        if ($this->request_method()=="POST") {
+             if (!isset($this->_params->name))
+                 $this->Response->throw_exception(400, "Missing NAT name"); # Seems to be mandatory in the GUI
+             if (!isset($this->_params->type))
+diff -Naur a/api/controllers/Tools.php b/api/controllers/Tools.php
+--- a/api/controllers/Tools.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/controllers/Tools.php	2026-08-17 05:53:21.000000000 +1000
+@@ -60,7 +60,7 @@
+ 		$this->rewrite_subcontroller ();
+ 
+         // set keys if options are not provided
+-		if($_SERVER['REQUEST_METHOD']!="OPTIONS" && isset($this->_params->controller)) {
++		if($this->request_method()!="OPTIONS" && isset($this->_params->controller)) {
+             // set valid keys
+     		$this->set_valid_keys ($this->_params->id);
+             // set sort key
+@@ -486,7 +486,7 @@
+ 	 */
+ 	private function validate_subcontroller () {
+ 		// not options
+-		if($_SERVER['REQUEST_METHOD']!=="OPTIONS") {
++		if($this->request_method()!=="OPTIONS") {
+     		if (!in_array($this->_params->id, @$this->subcontrollers))			{ $this->Response->throw_exception(400, "Invalid subcontroller"); }
+ 		}
+ 	}
+diff -Naur a/api/controllers/Vlans.php b/api/controllers/Vlans.php
+--- a/api/controllers/Vlans.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/controllers/Vlans.php	2026-08-17 05:53:21.000000000 +1000
+@@ -284,7 +284,7 @@
+ 			$this->Response->throw_exception(500, _('Highest possible VLAN number is ').$this->settings->vlanMax.'!');
+ 
+ 		//if it already exist die
+-		if($this->settings->vlanDuplicate==0 && $_SERVER['REQUEST_METHOD']=="POST") {
++		if($this->settings->vlanDuplicate==0 && $this->request_method()=="POST") {
+ 			$check_vlan = $this->Admin->fetch_multiple_objects ("vlans", "domainId", $this->_params->domainId, "vlanId");
+ 			if($check_vlan!==false) {
+ 				foreach($check_vlan as $v) {
+@@ -296,9 +296,9 @@
+ 		}
+ 
+ 		//if number too high
+-		if($this->_params->number>$this->settings->vlanMax && $_SERVER['REQUEST_METHOD']!="DELETE")
++		if($this->_params->number>$this->settings->vlanMax && $this->request_method()!="DELETE")
+ 																							{ $this->Response->throw_exception(409, 'Highest possible VLAN number is '.$this->settings->vlanMax.'!'); }
+-		if($_SERVER['REQUEST_METHOD']=="POST") {
++		if($this->request_method()=="POST") {
+ 			if($this->_params->number<0)													{ $this->Response->throw_exception(400, "Vlan number cannot be negative"); }
+ 			elseif(!is_numeric($this->_params->number))										{ $this->Response->throw_exception(400, "Vlan number must be number"); }
+ 			if(is_blank($this->_params->name))													{ $this->Response->throw_exception(400, "Vlan name is required"); }
+diff -Naur a/api/controllers/Vrfs.php b/api/controllers/Vrfs.php
+--- a/api/controllers/Vrfs.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/controllers/Vrfs.php	2026-08-17 05:53:21.000000000 +1000
+@@ -257,7 +257,7 @@
+ 	 */
+ 	private function validate_vrf_edit () {
+ 		// check for POST method
+-		if($_SERVER['REQUEST_METHOD']=="POST") {
++		if($this->request_method()=="POST") {
+ 			// check name
+ 			if(is_blank($this->_params->name))												{ $this->Response->throw_exception(400, "VRF name is required"); }
+ 			// check that it exists
+diff -Naur a/api/index.php b/api/index.php
+--- a/api/index.php	2026-04-28 03:33:13.000000000 +1000
++++ b/api/index.php	2026-08-17 05:53:21.000000000 +1000
+@@ -45,8 +45,10 @@
+ # get phpipam settings
+ $settings = $Tools->get_settings();
+ 
++$request_method = strtoupper((string) $_SERVER['REQUEST_METHOD']);
++
+ # set empty controller for options
+-if($_SERVER['REQUEST_METHOD']=="OPTIONS") {
++if($request_method=="OPTIONS") {
+ 	if( !isset($_GET['controller']) || $_GET['controller']=="")	{ $_GET['controller'] = "Tools"; }
+ }
+ 
+@@ -72,9 +74,9 @@
+ 	$app = $Tools->fetch_object ("api", "app_id", $_GET['app_id']);
+ 
+ 	// verify app_id
+-	if($app === false) 										{ $Response->throw_exception(400, "Invalid application id"); }
++	if(!is_object($app)) 										{ $Response->throw_exception(400, "Invalid application id"); }
+ 	// check that app is enabled
+-	if($app->app_permissions==="0") 						{ $Response->throw_exception(503, "Application disabled"); }
++	if($app->app_permissions==0) 						{ $Response->throw_exception(503, "Application disabled"); }
+ 
+ 
+ 	/* Check app security and prepare request parameters ---------- */
+@@ -130,8 +132,8 @@
+ 	}
+ 
+ 
+-	// Append Global API parameters / POST parameters if POST,PATCH or DELETE
+-	if($_SERVER['REQUEST_METHOD']=="GET" || $_SERVER['REQUEST_METHOD']=="POST" || $_SERVER['REQUEST_METHOD']=="PATCH" || $_SERVER['REQUEST_METHOD']=="DELETE") {
++	// Append Global API parameters / POST parameters if POST, PATCH or DELETE
++	if(in_array($request_method, ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'])) {
+ 		// if application tupe is JSON (application/json)
+ 		if(strpos($content_type, "application/json")!==false){
+ 			$rawPostData = file_get_contents('php://input');
+@@ -195,7 +197,7 @@
+ 	// throw token not needed
+ 	else {
+ 		// validate ssl_code
+-		if($app->app_security=="ssl_code" && $_SERVER['REQUEST_METHOD']!="GET") {
++		if($app->app_security=="ssl_code" && in_array($request_method, ['GET', 'HEAD'])) {
+ 			// start auth class and validate connection
+ 			require_once( dirname(__FILE__) . '/controllers/User.php');				// authentication and token handling
+ 			$Authentication = new User_controller ($Database, $Tools, $Params, $Response);
+@@ -214,10 +216,7 @@
+ 	}
+ 	// verify permissions for delete/create/edit if controller is not user (needed for auth)
+ 	if ($Params->controller != "user") {
+-    	if( ($_SERVER['REQUEST_METHOD']=="POST" || $_SERVER['REQUEST_METHOD']=="PATCH"
+-    	  || $_SERVER['REQUEST_METHOD']=="PUT"  || $_SERVER['REQUEST_METHOD']=="DELETE"
+-    	  )
+-    	  && $app->app_permissions<2) {
++    	if( in_array($request_method, ['POST', 'PATCH', 'PUT', 'DELETE']) && $app->app_permissions<2 ) {
+     		$Response->throw_exception(401, 'invalid permissions');
+     	}
+ 	}
+@@ -231,15 +230,20 @@
+ 	$controller_name = ucfirst($Params->controller)."_controller";
+ 	$controller_file = ucfirst($Params->controller);
+ 
+-	// check if the controller exists. if not, throw an exception
+-	if( file_exists( dirname(__FILE__) . "/controllers/$controller_file.php") ) {
+-		require_once( dirname(__FILE__) . "/controllers/$controller_file.php");
+-	}
+-	// check custom controllers
+-	elseif( file_exists( dirname(__FILE__) . "/controllers/custom/$controller_file.php") ) {
+-		require_once( dirname(__FILE__) . "/controllers/custom/$controller_file.php");
++	$valid_controller = false;
++	foreach ([__DIR__ . "/controllers",  __DIR__ . "/controllers/custom"] as $location) {
++		$base_path = realpath($location);
++
++		$candidate = $location . "/$controller_file.php";
++		if (realpath(dirname($candidate)) == $base_path && file_exists($candidate)) {
++			$valid_controller = $candidate;
++			break;
++		}
+ 	}
+-	else {
++
++	if ($valid_controller) {
++		require_once($valid_controller);
++	} else {
+ 		$Response->throw_exception(400, 'Invalid controller');
+ 	}
+ 
+@@ -254,17 +258,17 @@
+ 	// POST and PATCH. This only works for controllers that support custom
+ 	// fields and if the app has nested custom fields enabled, otherwise
+ 	// this is skipped.
+-	if (strtoupper($_SERVER['REQUEST_METHOD']) == 'POST' || strtoupper($_SERVER['REQUEST_METHOD']) == 'PATCH') {
++	if (in_array($request_method, ['POST', 'PATCH', 'PUT'])) {
+ 		$controller->unmarshal_nested_custom_fields();
+ 	}
+ 
+ 	// check if the action exists in the controller. if not, throw an exception.
+-	if( method_exists($controller, strtolower($_SERVER['REQUEST_METHOD'])) === false ) {
++	if( method_exists($controller, strtolower($request_method)) === false ) {
+ 		$Response->throw_exception(501, $Response->errors[501]);
+ 	}
+ 
+ 	// Transaction locking is only enabled for POST, PUT, PATCH and DELETE requests.
+-	if (in_array(strtoupper($_SERVER['REQUEST_METHOD']), ["POST", "PUT", "PATCH", "DELETE"])) {
++	if (in_array($request_method, ["POST", "PATCH", "PUT", "DELETE"])) {
+ 		$lock_type = $app->app_lock_type;
+ 
+ 		if ($lock_type == "Auto") {
+@@ -278,22 +282,22 @@
+ 
+ 			// Execute the action with file lock.
+ 			// Safe when load-balanced to singe instance.
+-			$result = $controller->{$_SERVER['REQUEST_METHOD']}();
++			$result = $controller->{$request_method}();
+ 		} elseif ($lock_type == "MySQL") {
+ 			$Lock = new LockForUpdateMySQL($Database, 'apiLock', 1);
+ 			$Lock->obtain_lock($app->app_lock_wait);
+ 
+ 			// execute the action with MySQL row lock.
+ 			// Safe when load-balanced across multiple instances.
+-			$result = $controller->{$_SERVER['REQUEST_METHOD']}();
++			$result = $controller->{$request_method}();
+ 		} else {
+ 			// Disabled - *DANGER* execute write actions without locking.
+ 			// Not guaranteed to be thread safe.
+-			$result = $controller->{$_SERVER['REQUEST_METHOD']}();
++			$result = $controller->{$request_method}();
+ 		}
+ 	} else {
+ 		// Execute the GET read requests without lock.
+-		$result = $controller->{$_SERVER['REQUEST_METHOD']}();
++		$result = $controller->{$request_method}();
+ 	}
+ } catch ( Exception $e ) {
+ 	// catch any exceptions and report the problem
+diff -Naur a/app/admin/custom-fields/index.php b/app/admin/custom-fields/index.php
+--- a/app/admin/custom-fields/index.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/admin/custom-fields/index.php	2026-08-17 05:53:21.000000000 +1000
+@@ -9,6 +9,9 @@
+ # admin check
+ $User->is_admin();
+ 
++# create csrf token
++$csrf = $User->Crypto->csrf_cookie ("create", "custom_field_reorder");
++
+ /* fetch all custom fields */
+ $custom_tables = array(
+ 						"ipaddresses"      => _("IP addresses"),
+@@ -111,7 +114,7 @@
+ 			print "<tr class='$class'>";
+ 
+ 			# ordering
+-			if (( ($m+1) != $size) ) 	{ print "<td style='width:10px;'><button class='btn btn-xs btn-default down' data-direction='down' data-table='$table' rel='tooltip' title='"._("Move down")."' data-fieldname='".$custom_fields_numeric[$table][$m]['name']."' data-nextfieldname='".$custom_fields_numeric[$table][$m+1]['name']."'><i class='fa fa-chevron-down'></i></button></td>";	}
++			if (( ($m+1) != $size) ) 	{ print "<td style='width:10px;'><button class='btn btn-xs btn-default down' data-direction='down' data-table='$table' data-csrf='$csrf' rel='tooltip' title='"._("Move down")."' data-fieldname='".$custom_fields_numeric[$table][$m]['name']."' data-nextfieldname='".$custom_fields_numeric[$table][$m+1]['name']."'><i class='fa fa-chevron-down'></i></button></td>";	}
+ 			else 						{ print "<td style='width:10px;'></td>";}
+ 
+ 			print "<td class='name'>".$Tools->print_custom_field_name ($f['name'])."</td>";
+diff -Naur a/app/admin/custom-fields/order.php b/app/admin/custom-fields/order.php
+--- a/app/admin/custom-fields/order.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/admin/custom-fields/order.php	2026-08-17 05:53:21.000000000 +1000
+@@ -18,6 +18,8 @@
+ $User->check_user_session();
+ # admin check
+ $User->is_admin();
++# validate csrf cookie
++$User->Crypto->csrf_cookie ("validate", "custom_field_reorder", $POST->csrf_cookie) === false ? $Result->show("danger", _("Invalid CSRF cookie"), true) : "";
+ 
+ # some verifications
+ if( (empty($POST->current)) || (empty($POST->next)) ) 							{ $Result->show("danger", _('Fields cannot be empty')."!", true); }
+diff -Naur a/app/admin/devices/edit-rack-dropdown.php b/app/admin/devices/edit-rack-dropdown.php
+--- a/app/admin/devices/edit-rack-dropdown.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/admin/devices/edit-rack-dropdown.php	2026-08-17 05:53:21.000000000 +1000
+@@ -1,6 +1,16 @@
+ <?php
+ require_once( dirname(__FILE__) . '/../../../functions/functions.php' );
+ 
++$ajax_loaded = false;
++if (!isset($User) || !is_object($User)) {
++	# initialize user object
++	$Database 	= new Database_PDO;
++	$User 		= new User($Database);
++	$Racks 		= new phpipam_rack($Database);
++	$Result 	= new Result();
++
++	$ajax_loaded = true;
++}
+ # verify that user is logged in
+ $User->check_user_session();
+ # perm check popup
+@@ -22,7 +32,7 @@
+ # show only for numeric (set) rackid
+ if($POST->rackid>0 || @$device['rack']>0) {
+ 	# load objects for ajax-loaded stuff
+-	if(!isset($User) || !is_object($User)) {
++	if($ajax_loaded) {
+ 		# initialize user object
+ 		$Database 	= new Database_PDO;
+ 		$User 		= new User ($Database);
+diff -Naur a/app/admin/subnets/permissions-show.php b/app/admin/subnets/permissions-show.php
+--- a/app/admin/subnets/permissions-show.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/admin/subnets/permissions-show.php	2026-08-17 05:53:21.000000000 +1000
+@@ -21,10 +21,11 @@
+ # create csrf token
+ $csrf = $User->Crypto->csrf_cookie ("create", "permissions");
+ 
+-
+ # ID must be numeric
+ if(!is_numeric($POST->subnetId))	{ $Result->show("danger", _("Invalid ID"), true, true); }
+ 
++if($Sections->check_permission ($User->user, $POST->subnetId) != User::ACCESS_RWA) { $Result->show("danger", _('You do not have permissions to add edit/delete this subnet')."!", true); }
++
+ # get all groups
+ $groups = $Admin->fetch_all_objects ("userGroups", "g_name");
+ # get subnet details
+diff -Naur a/app/admin/subnets/permissions-submit.php b/app/admin/subnets/permissions-submit.php
+--- a/app/admin/subnets/permissions-submit.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/admin/subnets/permissions-submit.php	2026-08-17 05:53:21.000000000 +1000
+@@ -23,6 +23,7 @@
+ # validate csrf cookie
+ $User->Crypto->csrf_cookie ("validate", "permissions", $POST->csrf_cookie) === false ? $Result->show("danger", _("Invalid CSRF cookie"), true) : "";
+ 
++if($Sections->check_permission ($User->user, $POST->subnetId) != User::ACCESS_RWA) { $Result->show("danger", _('You do not have permissions to add edit/delete this subnet')."!", true); }
+ 
+ # fetch old subnet
+ $subnet_old = $Subnets->fetch_subnet ("id", $POST->subnetId);
+diff -Naur a/app/subnets/addresses/address-modify.php b/app/subnets/addresses/address-modify.php
+--- a/app/subnets/addresses/address-modify.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/subnets/addresses/address-modify.php	2026-08-17 05:53:21.000000000 +1000
+@@ -77,6 +77,9 @@
+ }
+ else {
+ 	$address = (array) $Addresses->fetch_address(null, $id);
++	if (empty($address) || (int) $address['subnetId'] !== (int) $subnetId) {
++		$Result->show("danger", _("Invalid address for selected subnet"), true, true);
++	}
+ 	// save old mac for multicast check
+ 	$address['mac_old'] = @$address['mac'];
+ }
+diff -Naur a/app/subnets/addresses/address-modify-submit.php b/app/subnets/addresses/address-modify-submit.php
+--- a/app/subnets/addresses/address-modify-submit.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/subnets/addresses/address-modify-submit.php	2026-08-17 05:53:21.000000000 +1000
+@@ -131,6 +131,9 @@
+ # we need old address details for mailing or if we are editing address
+ if($action=="edit" || $action=="delete" || $action=="move") {
+ 	$address_old = (array) $Addresses->fetch_address(null, $POST->id);
++	if (empty($address_old) || (int) $address_old['subnetId'] !== (int) $POST->subnetId) {
++		$Result->show("danger", _("Invalid address for selected subnet"), true);
++	}
+ }
+ 
+ # set excludePing value
+@@ -303,6 +306,8 @@
+ 	# reset subnet if move
+ 	if($action == "move")	{
+ 		$subnet = (array) $Subnets->fetch_subnet(null, $POST->newSubnet);
++		sizeof($subnet)>0 ?: $Result->show("danger", _("Invalid destination subnet"), true);
++		$Subnets->check_permission($User->user, $POST->newSubnet) > User::ACCESS_R ?: $Result->show("danger", _("Cannot edit IP address"), true);
+ 		$POST->ip_addr = $address_old['ip'];
+ 	}
+ 	# if errors are present print them, else execute query!
+diff -Naur a/app/subnets/addresses/move-address.php b/app/subnets/addresses/move-address.php
+--- a/app/subnets/addresses/move-address.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/subnets/addresses/move-address.php	2026-08-17 05:53:21.000000000 +1000
+@@ -37,6 +37,12 @@
+ $address = (array) $Addresses->fetch_address(null, $POST->id);
+ $subnet  = (array) $Subnets->fetch_subnet(null, $POST->subnetId);
+ 
++if (empty($address) || empty($subnet) || (int) $address['subnetId'] !== (int) $subnet['id']) {
++	$Result->show("danger", _("Invalid address for selected subnet"), true);
++}
++
++$Subnets->check_permission($User->user, $address['subnetId']) > 1 ?: $Result->show("danger", _("Cannot edit IP address"), true);
++
+ # fetch all slave subnets
+ $Subnets->fetch_subnet_slaves_recursive ($subnet['id']);
+ ?>
+diff -Naur a/app/subnets/addresses/ping-address.php b/app/subnets/addresses/ping-address.php
+--- a/app/subnets/addresses/ping-address.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/subnets/addresses/ping-address.php	2026-08-17 05:53:21.000000000 +1000
+@@ -30,6 +30,9 @@
+ 	!is_blank($POST->id) ?:								$Result->show("danger", _("Invalid ID"), true, true, false, true);
+ 	# fetch address
+ 	$address = (array) $Addresses->fetch_address(null, $POST->id);
++	if (empty($address) || (int) $address['subnetId'] !== (int) $POST->subnetId) {
++		$Result->show("danger", _("Invalid address for selected subnet"), true, true, false, true);
++	}
+ }
+ // from adding new IP, validate
+ else {
+diff -Naur a/app/subnets/subnet-details/subnet-details.php b/app/subnets/subnet-details/subnet-details.php
+--- a/app/subnets/subnet-details/subnet-details.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/subnets/subnet-details/subnet-details.php	2026-08-17 05:53:21.000000000 +1000
+@@ -4,7 +4,8 @@
+  * Main script to display master subnet details if subnet has slaves
+  ***********************************************************************/
+ 
+-$csrf = $User->Crypto->csrf_cookie ("create-if-not-exists", "generate-export");
++$csrf1 = $User->Crypto->csrf_cookie ("create-if-not-exists", "generate-export");
++$csrf2 = $User->Crypto->csrf_cookie ("create-if-not-exists", "temp-shares");
+ 
+ # set rowspan
+ $rowSpan = 10 + sizeof($custom_fields);
+@@ -560,7 +561,7 @@
+ 			print "<td>";
+ 			$m=1;
+ 			foreach($active_shares as $s) {
+-				print "<button class='btn btn-xs btn-default removeSharedTemp' data-code='$s->code' ><i class='fa fa-times'></i></button> <a href='".create_link("temp_share",$s->code)."'>Share $m</a> ("._("Expires")." ".date("Y-m-d H:i:s", $s->validity).")<br>";
++				print "<button class='btn btn-xs btn-default removeSharedTemp' data-csrf='$csrf2' data-code='$s->code' ><i class='fa fa-times'></i></button> <a href='".create_link("temp_share",$s->code)."'>Share $m</a> ("._("Expires")." ".date("Y-m-d H:i:s", $s->validity).")<br>";
+ 				$m++;
+ 			}
+ 			print "<td>";
+@@ -694,11 +695,11 @@
+ 	print "<div class='btn-group'>";
+ 		//import
+ 		if($sp['import'])
+-		print "<a class='csvImport btn btn-xs btn-default'  href='' data-container='body' rel='tooltip' title='"._('Import IP addresses')."' data-subnetId='$subnet[id]' csrf='$csrf'>		<i class='fa fa-download'></i></a>";
++		print "<a class='csvImport btn btn-xs btn-default'  href='' data-container='body' rel='tooltip' title='"._('Import IP addresses')."' data-subnetId='$subnet[id]' csrf='$csrf1'>		<i class='fa fa-download'></i></a>";
+ 		else
+ 		print "<a class='btn btn-xs btn-default disabled'  	href='' data-container='body' rel='tooltip' title='"._('Import IP addresses')."'>									<i class='fa fa-download'></i></a>";
+ 		//export
+-		print "<a class='csvExport btn btn-xs btn-default'  href='' data-container='body' rel='tooltip' title='"._('Export IP addresses')."' data-subnetId='$subnet[id]' csrf='$csrf'>		<i class='fa fa-upload'></i></a>";
++		print "<a class='csvExport btn btn-xs btn-default'  href='' data-container='body' rel='tooltip' title='"._('Export IP addresses')."' data-subnetId='$subnet[id]' csrf='$csrf1'>		<i class='fa fa-upload'></i></a>";
+ 		//share
+ 		if($subnet_permission>1 && $User->settings->tempShare==1) {
+         print "<a class='btn btn-xs btn-default open_popup' data-script='app/tools/temp-shares/edit.php' data-class='700' data-action='edit' data-id='$subnet[id]' data-type='subnets' data-container='body' rel='tooltip' title='"._('Temporary share subnet')."'><i class='fa fa-share-alt'></i></a>";
+diff -Naur a/app/temp_share/index.php b/app/temp_share/index.php
+--- a/app/temp_share/index.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/temp_share/index.php	2026-08-17 05:53:21.000000000 +1000
+@@ -102,7 +102,7 @@
+ 	# disabled
+ 	if($settings->tempShare!=1)										{ $Result->show("danger", _("Temporary sharing disabled"), false); }
+ 	# none
+-	elseif(sizeof($temp_objects)==0)								{ $Log->write( _("Tempory share access"), $GET->section, 2); $Result->show("danger", _("Invalid share key")."! <a href='".create_link("login")."' class='btn btn-sm btn-default'>Login</a>", false); }
++	elseif(!is_array($temp_objects))								{ $Log->write( _("Tempory share access"), $GET->section, 2); $Result->show("danger", _("Invalid share key")."! <a href='".create_link("login")."' class='btn btn-sm btn-default'>Login</a>", false); }
+ 	# try to fetch object
+ 	elseif(!array_key_exists($GET->section, $temp_objects))		{ $Log->write( _("Tempory share access"), $GET->section, 2); $Result->show("danger", _("Invalid share key")."! <a href='".create_link("login")."' class='btn btn-sm btn-default'>Login</a>", false); }
+ 	# ok, include script
+@@ -113,12 +113,20 @@
+ 			//log
+ 			$Log->write( _("Tempory share access"), $GET->section, 0);
+ 
+-			if($temp_objects[$GET->section]->type=="subnets") 		{
++			if ($temp_objects[$GET->section]->type == "subnets") {
+ 				# address?
+-				if(isset($GET->subnetId))							{ include("address.php"); }
+-				else													{ include("subnet.php"); }
+-			}
+-			else														{
++				if (isset($GET->subnetId)) {
++					$address = $Addresses->fetch_address(null, $GET->subnetId);
++					if (!is_object($address) || $address->subnetId != $temp_objects[$GET->section]->id) {
++						$Result->show("danger", _("Invalid ID"), true);
++					}
++					unset($address);
++
++					include("address.php");
++				} else {
++					include("subnet.php");
++				}
++			} else {
+ 				# set object
+ 				$object = $temp_objects[$GET->section];
+ 
+diff -Naur a/app/tools/temp-shares/delete-result.php b/app/tools/temp-shares/delete-result.php
+--- a/app/tools/temp-shares/delete-result.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/tools/temp-shares/delete-result.php	2026-08-17 05:53:21.000000000 +1000
+@@ -17,6 +17,8 @@
+ # verify that user is logged in
+ $User->check_user_session();
+ 
++$User->Crypto->csrf_cookie ("validate", "temp-shares", $POST->csrf_cookie) === false ? $Result->show("danger", _("Invalid CSRF cookie"), true) : "";
++
+ print '<div class="pHeader">'._("Remove temporary share").'</div>';
+ print '<div class="pContent">';
+ 
+diff -Naur a/app/tools/temp-shares/edit.php b/app/tools/temp-shares/edit.php
+--- a/app/tools/temp-shares/edit.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/tools/temp-shares/edit.php	2026-08-17 05:53:21.000000000 +1000
+@@ -17,6 +17,8 @@
+ # verify that user is logged in
+ $User->check_user_session();
+ 
++$csrf = $User->Crypto->csrf_cookie ("create-if-not-exists", "temp-shares");
++
+ # checks
+ if($User->settings->tempShare!=1)								{ $Result->show("danger", _("Temporary sharing disabled"), true, true); }
+ if($POST->type!="subnets"&&$POST->type!="ipaddresses") 	{ $Result->show("danger", _("Invalid type"), true, true); }
+@@ -25,17 +27,23 @@
+ 
+ //fetch object details
+ $object = $Tools->fetch_object ($POST->type, "id", $POST->id);
+-
++if (!is_object($object)) {
++	$Result->show("danger", _("Invalid ID"), true, true);
++}
+ 
+ # set share details
+ $share = new StdClass;
+ //set details
+ if($POST->type=="subnets") {
++	if($Subnets->check_permission ($User->user, $object->id)<User::ACCESS_RW) { $Result->show("danger", _("Invalid ID"), true, true); }
++
+ 	$tmp[] = _("Share type: subnet");
+ 	$tmp[] = $Subnets->transform_to_dotted($object->subnet)."/$object->mask";
+ 	$tmp[] = $object->description;
+ }
+ else {
++	if($Subnets->check_permission ($User->user, $object->subnetId)<User::ACCESS_RW) { $Result->show("danger", _("Invalid ID"), true, true); }
++
+ 	$tmp[] = _("Share type: IP address");
+ 	$tmp[] = $Subnets->transform_to_dotted($object->ip_addr);
+ 	$tmp[] = $object->description;
+@@ -108,6 +116,7 @@
+     </tr>
+ 
+ </table>
++<input type='hidden' name='csrf_cookie' value='<?php print $csrf; ?>'>";
+ </form>
+ 
+ </div>
+diff -Naur a/app/tools/temp-shares/edit-result.php b/app/tools/temp-shares/edit-result.php
+--- a/app/tools/temp-shares/edit-result.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/tools/temp-shares/edit-result.php	2026-08-17 05:53:21.000000000 +1000
+@@ -17,6 +17,8 @@
+ # verify that user is logged in
+ $User->check_user_session();
+ 
++$User->Crypto->csrf_cookie ("validate", "temp-shares", $POST->csrf_cookie) === false ? $Result->show("danger", _("Invalid CSRF cookie"), true) : "";
++
+ /* checks */
+ if($User->settings->tempShare!=1)									{ $Result->show("danger", _("Temporary sharing disabled"), true); }
+ if($POST->type!="subnets"&&$POST->type!="ipaddresses") 		{ $Result->show("danger", _("Invalid type"), true); }
+@@ -33,13 +35,20 @@
+ 
+ # fetch object
+ $object = $Admin->fetch_object ($POST->type, "id", $POST->id);
++if (!is_object($object)) {
++	$Result->show("danger", _("Invalid ID"), true, true);
++}
+ 
+ if($POST->type=="subnets") {
++	if($Subnets->check_permission ($User->user, $object->id)<User::ACCESS_RW) { $Result->show("danger", _("Invalid ID"), true, true); }
++
+ 	$tmp[] = _("Share type: subnet");
+ 	$tmp[] = "\t".$Subnets->transform_to_dotted($object->subnet)."/$object->mask";
+ 	$tmp[] = "\t".$object->description;
+ }
+ else {
++	if($Subnets->check_permission ($User->user, $object->subnetId)<User::ACCESS_RW) { $Result->show("danger", _("Invalid ID"), true, true); }
++
+ 	$tmp[] = _("Share type: IP address");
+ 	$tmp[] = "\t".$Subnets->transform_to_dotted($object->ip_addr);
+ 	$tmp[] = "\t".$object->description;
+@@ -68,6 +77,9 @@
+ 	is_array($old_access) ? : $old_access = array();
+ }
+ $new_access = json_encode(array_merge($old_access, array_filter($new_access)));
++if (strlen($new_access) > 65535) {
++	$Result->show("danger", _("Maximum number of shares exceeded"), true, true);
++}
+ 
+ # execute
+ if(!$Admin->object_modify("settings", "edit", "id", array("id"=>1,"tempAccess"=>$new_access))) 	{ $Result->show("danger",  _("Temporary share create error"), true); }
+@@ -95,7 +107,8 @@
+ 		$content[] = "<tr><td colsapn='2' style='line-height:18px;'>$User->mail_font_style <strong>Details:</strong><br>".implode("<br> - ", $tmp)."</font><br></td></tr>";
+ 		$content[] = "<tr><td style='padding:5px;padding-left:15px;padding-top:20px;font-style:italic;'>$User->mail_font_style_light Sent by user ".$User->user->real_name." at ".date('Y/m/d H:i')."</font></td></tr>";
+ 		//set al content
+-		$content_plain[] = "$subject"."\r\n------------------------------\r\n";
++		$content_plain = [];
++		$content_plain[] = "New ipam share created"."\r\n------------------------------\r\n";
+ 		$content_plain[] = "Hi, new share was created on ".$User->settings->siteTitle.", available on following address:\r\n ".$url;
+ 		$content_plain[] = "\r\nDetails: \r\n".implode("\r\n", $tmp)."\r\n";
+ 		$content_plain[] = "\r\n\r\n"._("Sent by user")." ".$User->user->real_name." at ".date('Y/m/d H:i');
+diff -Naur a/app/tools/temp-shares/index.php b/app/tools/temp-shares/index.php
+--- a/app/tools/temp-shares/index.php	2026-04-28 03:33:13.000000000 +1000
++++ b/app/tools/temp-shares/index.php	2026-08-17 05:53:21.000000000 +1000
+@@ -7,6 +7,8 @@
+ # verify that user is logged in
+ $User->check_user_session();
+ 
++$csrf = $User->Crypto->csrf_cookie ("create-if-not-exists", "temp-shares");
++
+ # fetch all shares
+ $temp_shares = db_json_decode($User->settings->tempAccess);
+ ?>
+@@ -91,7 +93,7 @@
+ 		# remove
+ 		print "	<td class='actions'>";
+ 		print "	<div class='btn-group'>";
+-		print "		<button class='btn btn-xs btn-default removeSharedTemp' data-code='$s->code' ><i class='fa fa-times'></i></button>";
++		print "		<button class='btn btn-xs btn-default removeSharedTemp' data-csrf='$csrf' data-code='$s->code' ><i class='fa fa-times'></i></button>";
+ 		print "	</div>";
+ 		print "</td>";
+ 
+diff -Naur a/db/SCHEMA.sql b/db/SCHEMA.sql
+--- a/db/SCHEMA.sql	2026-04-28 03:33:13.000000000 +1000
++++ b/db/SCHEMA.sql	2026-08-17 05:53:21.000000000 +1000
+@@ -1102,5 +1102,5 @@
+ # Dump of table -- for autofix comment, leave as it is
+ # ------------------------------------------------------------
+ 
+-UPDATE `settings` SET `version` = "1.81";
++UPDATE `settings` SET `version` = "1.82";
+ UPDATE `settings` SET `dbversion` = 46;
+diff -Naur a/functions/classes/class.Addresses.php b/functions/classes/class.Addresses.php
+--- a/functions/classes/class.Addresses.php	2026-04-28 03:33:13.000000000 +1000
++++ b/functions/classes/class.Addresses.php	2026-08-17 05:53:21.000000000 +1000
+@@ -204,7 +204,7 @@
+ 		$method = is_null($method) ? "id" : $method;
+ 
+ 		# check cache first
+-		$cached = ($method=="id") ? $this->cache_check("ipaddresses", $id) : false;
++		$cached = $this->cache_check("ipaddresses", $method, $id);
+ 
+ 		if(is_object($cached))	{
+ 			return $cached;
+@@ -217,7 +217,7 @@
+ 			}
+ 			# save to addresses cache
+ 			if(is_object($address)) {
+-				$this->cache_write("ipaddresses", $address);
++				$this->cache_write("ipaddresses", $method, $address);
+ 			}
+ 			#result
+ 			return !is_null($address) ? $address : false;
+@@ -240,7 +240,7 @@
+ 		}
+ 		# save to addresses cache
+ 		if(is_object($address)) {
+-			$this->cache_write("ipaddresses", $address);
++			$this->cache_write("ipaddresses", "id", $address);
+ 		}
+ 		#result
+ 		return !is_null($address) ? $address : false;
+@@ -263,7 +263,7 @@
+ 			# save to addresses cache
+ 			if(is_array($addresses)) {
+ 				foreach($addresses as $address) {
+-					$this->cache_write("ipaddresses", $address);
++					$this->cache_write("ipaddresses", "id", $address);
+ 				}
+ 			}
+ 		}
+@@ -290,7 +290,7 @@
+ 	 */
+ 	private function bulk_fetch_similar_addresses($address, $linked_field, $value) {
+ 		// Check cache
+-		$cached_item = $this->cache_check("similar_addresses", "f=$linked_field id=$address->subnetId");
++		$cached_item = $this->cache_check("similar_addresses", "id", "f=$linked_field id=$address->subnetId");
+ 		if (is_object($cached_item))
+ 			return $cached_item->result;
+ 
+@@ -312,7 +312,7 @@
+ 		}
+ 
+ 		// Save to cache and return
+-		$this->cache_write ("similar_addresses", (object) ["id"=>"f=$linked_field id=$address->subnetId", "result" => $bulk_search]);
++		$this->cache_write ("similar_addresses", "id", (object) ["id"=>"f=$linked_field id=$address->subnetId", "result" => $bulk_search]);
+ 		return $bulk_search;
+ 	}
+ 
+@@ -1294,7 +1294,7 @@
+ 		# save to addresses cache (complete objects only)
+ 		if(is_array($addresses) && $fields=="*") {
+ 			foreach($addresses as $address) {
+-				$this->cache_write("ipaddresses", $address);
++				$this->cache_write("ipaddresses", "id", $address);
+ 			}
+ 		}
+ 		# result
+@@ -1954,6 +1954,10 @@
+                 foreach ($objects as $ot=>$ids) {
+                     if (sizeof($ids)>0) {
+                         foreach ($ids as $id) {
++                            // Check table names - MySQL on Windows is case-insensitive
++                            if (!in_array(strtolower($ot), ['subnets', 'ipaddresses'])) {
++                                continue;
++                            }
+                             // fetch
+                             $item = $this->fetch_object($ot, "id", $id);
+                             if($item!==false) {
+diff -Naur a/functions/classes/class.Admin.php b/functions/classes/class.Admin.php
+--- a/functions/classes/class.Admin.php	2026-04-28 03:33:13.000000000 +1000
++++ b/functions/classes/class.Admin.php	2026-08-17 05:53:21.000000000 +1000
+@@ -800,11 +800,11 @@
+ 	    $old = (array) $Tools->fetch_full_field_definition ($table, $current);
+ 
+ 	    # set update request
+-	    if($old['Null']=="NO")	{ $query  = 'ALTER TABLE `'.$table.'` MODIFY COLUMN `'. $current .'` '.$old['Type'].' NOT NULL COMMENT "'.$old['Comment'].'" AFTER `'. $next .'`;'; }
+-	    else					{ $query  = 'ALTER TABLE `'.$table.'` MODIFY COLUMN `'. $current .'` '.$old['Type'].' DEFAULT NULL COMMENT "'.$old['Comment'].'" AFTER `'. $next .'`;'; }
++	    if($old['Null']=="NO")	{ $query  = 'ALTER TABLE `'.$table.'` MODIFY COLUMN `'. $current .'` '.$old['Type'].' NOT NULL     COMMENT :comment AFTER `'. $next .'`;'; }
++	    else					{ $query  = 'ALTER TABLE `'.$table.'` MODIFY COLUMN `'. $current .'` '.$old['Type'].' DEFAULT NULL COMMENT :comment AFTER `'. $next .'`;'; }
+ 
+ 		# execute
+-		try { $res = $this->Database->runQuery($query); }
++		try { $res = $this->Database->runQuery($query, ['comment' => $old['Comment']]); }
+ 		catch (Exception $e) {
+ 			$this->Result->show("danger", _("Error: ").$e->getMessage(), false);
+ 			return false;
+diff -Naur a/functions/classes/class.Common.php b/functions/classes/class.Common.php
+--- a/functions/classes/class.Common.php	2026-04-28 03:33:13.000000000 +1000
++++ b/functions/classes/class.Common.php	2026-08-17 05:53:21.000000000 +1000
+@@ -219,7 +219,7 @@
+ 		# null table
+ 		if(is_null($table)||is_blank($table)) return false;
+ 
+-		$cached_item = $this->cache_check("fetch_all_objects", "t=$table f=$sortField o=$sortAsc");
++		$cached_item = $this->cache_check("fetch_all_objects", "id", "t=$table f=$sortField o=$sortAsc");
+ 		if(is_object($cached_item)) return $cached_item->result;
+ 
+ 		# fetch
+@@ -231,12 +231,12 @@
+ 		# save
+ 		if (is_array($res)) {
+ 			foreach ($res as $r) {
+-				$this->cache_write ($table, $r);
++				$this->cache_write ($table, null, $r);
+ 			}
+ 		}
+ 		# result
+ 		$result = (is_array($res) && sizeof($res)>0) ? $res : false;
+-		$this->cache_write ("fetch_all_objects", (object) ["id"=>"t=$table f=$sortField o=$sortAsc", "result" => $result]);
++		$this->cache_write ("fetch_all_objects", "id", (object) ["id"=>"t=$table f=$sortField o=$sortAsc", "result" => $result]);
+ 		return $result;
+ 	}
+ 
+@@ -257,22 +257,25 @@
+ 		if(is_null($value))    return false;
+ 		if($value===0)         return false;
+ 
++		# null method
++		$table  = $this->Database->escape($table);
++		$method = is_null($method) ? "id" : $this->Database->escape($method);
++
+ 		# check cache
+-		$cached_item = $this->cache_check($table, $value);
++		$cached_item = $this->cache_check($table, $method, $value);
+ 		if(is_object($cached_item))
+ 			return $cached_item;
+ 
+-		# null method
+-		$method = is_null($method) ? "id" : $this->Database->escape($method);
+-
+-		try { $res = $this->Database->getObjectQuery($table, "SELECT * from `$table` where `$method` = ? limit 1;", array($value)); }
+-		catch (Exception $e) {
+-			$this->Result->show("danger", _("Error: ").$e->getMessage());
++		$query = "SELECT * FROM `$table` WHERE `$method` = :method LIMIT 1;";
++		try {
++			$res = $this->Database->getObjectQuery($table, $query, ['method' => $value]);
++		} catch (Exception $e) {
++			$this->Result->show("danger", _("Error: ") . $e->getMessage());
+ 			return false;
+ 		}
+ 
+ 		# save to cache array
+-		$this->cache_write ($table, $res);
++		$this->cache_write ($table, $method, $res);
+ 
+ 		return is_object($res) ? $res : false;
+ 	}
+@@ -304,7 +307,7 @@
+ 			# save to cache
+ 			if ($result_fields==="*" && is_array($res)) { // Only cache objects containing all fields
+ 				foreach ($res as $r) {
+-					$this->cache_write ($table, $r);
++					$this->cache_write ($table, $field, $r);
+ 				}
+ 			}
+ 			# result
+@@ -361,7 +364,7 @@
+ 
+ 		$tableName = $this->Database->escape($tableName);
+ 
+-		$cached_item = $this->cache_check("getTableSchemaByField", "t=$tableName");
++		$cached_item = $this->cache_check("getTableSchemaByField", "id", "t=$tableName");
+ 		if(is_object($cached_item)) return $cached_item->result;
+ 
+ 		try {
+@@ -377,7 +380,7 @@
+ 				$results[$col->COLUMN_NAME] = $col;
+ 			}
+ 		}
+-		$this->cache_write("getTableSchemaByField", (object) ["id"=>"t=$tableName", "result" => $results]);
++		$this->cache_write("getTableSchemaByField", "id", (object) ["id"=>"t=$tableName", "result" => $results]);
+ 		return $results;
+ 	}
+ 
+@@ -459,10 +462,11 @@
+      *
+      * @access protected
+      * @param string $table
++     * @param string $identifier
+      * @param mixed $object
+      * @return void
+      */
+-    protected function cache_write ($table, $object) {
++    protected function cache_write ($table, $identifier, $object) {
+         if (!is_object($object))
+             return;
+ 
+@@ -470,13 +474,17 @@
+         if ($this->cache_check_exceptions($table))
+             return;
+ 
+-        // get and check id property
+-        $identifier = $this->cache_set_identifier ($table);
++        if (is_null($identifier)) {
++            $identifier = $this->cache_set_identifier($table);
++        }
+ 
+         if (!property_exists($object, $identifier))
+             return;
+ 
+         $id = $object->{$identifier};
++        if (is_null($id)) {
++            return;
++        }
+ 
+         // already set
+         if (isset($this->Database->cache[$table][$identifier][$id]))
+@@ -549,14 +557,12 @@
+      * Checks if object already exists in cache..
+      *
+      * @access protected
+-     * @param mixed $table
++     * @param string $table
++     * @param string $identifier
+      * @param mixed $id
+      * @return object|false
+      */
+-    protected function cache_check ($table, $id) {
+-        // get identifier
+-        $identifier = $this->cache_set_identifier ($table);
+-
++    protected function cache_check ($table, $identifier, $id) {
+         // check if cache is already set, otherwise return false
+         if (isset($this->Database->cache[$table][$identifier][$id]))
+             return clone $this->Database->cache[$table][$identifier][$id];
+diff -Naur a/functions/classes/class.Subnets.php b/functions/classes/class.Subnets.php
+--- a/functions/classes/class.Subnets.php	2026-04-28 03:33:13.000000000 +1000
++++ b/functions/classes/class.Subnets.php	2026-08-17 05:53:21.000000000 +1000
+@@ -582,7 +582,7 @@
+ 		# save to subnets cache
+ 		if ($result_fields==="*" && is_array($subnets)) { // Only cache objects containing all fields
+ 			foreach($subnets as $subnet) {
+-				$this->cache_write ("subnets", $subnet);
++				$this->cache_write ("subnets", "id", $subnet);
+ 			}
+ 		}
+ 		# result
+@@ -791,7 +791,7 @@
+ 			# save to subnets cache
+ 			if(is_array($subnets)) {
+ 				foreach($subnets as $subnet) {
+-					$this->cache_write ("subnets", $subnet);
++					$this->cache_write ("subnets", "id", $subnet);
+ 				}
+ 			}
+ 		}
+@@ -878,7 +878,7 @@
+ 		# save to subnets cache
+ 		if(is_array($subnets)) {
+ 			foreach($subnets as $subnet) {
+-                $this->cache_write ("subnets", $subnet);
++                $this->cache_write ("subnets", "id", $subnet);
+ 			}
+ 		}
+ 		# result
+@@ -921,7 +921,7 @@
+     		// check
+     		if (is_array($subnets)) {
+         		foreach ($subnets as $s) {
+-                    $this->cache_write ("subnets", $s);
++                    $this->cache_write ("subnets", "id", $s);
+         		}
+     		}
+ 			# result
+@@ -965,7 +965,7 @@
+ 		# save to subnets cache
+ 		if(is_array($subnets)) {
+ 			foreach($subnets as $subnet) {
+-                $this->cache_write ("subnets", $subnet);
++                $this->cache_write ("subnets", "id", $subnet);
+ 			}
+ 		}
+ 		# result
+@@ -1190,7 +1190,7 @@
+ 
+ 			foreach($slaves as $slave) {
+ 				# save to subnets cache
+-				$this->cache_write ("subnets", $slave);
++				$this->cache_write ("subnets", "id", $slave);
+ 
+ 				# save to full array of slaves
+ 				$this->slaves_full[$slave->id] = $slave;
+@@ -1331,7 +1331,7 @@
+ 			$subnet = (object) $subnet;
+ 		}
+ 
+-		$cached_item = $this->cache_check("fn_calculate_subnet_usage", $subnet->id);
++		$cached_item = $this->cache_check("fn_calculate_subnet_usage", "id", $subnet->id);
+ 		if(is_object($cached_item)) return $cached_item->result;
+ 
+ 		if ($this->has_slaves($subnet->id)) {
+@@ -1396,7 +1396,7 @@
+ 		$subnet_usage["maxhosts"] = $max_hosts;
+ 
+ 		// Save results
+-		$this->cache_write ("fn_calculate_subnet_usage", (object) ["id"=>$subnet->id, "result" => $subnet_usage]);
++		$this->cache_write ("fn_calculate_subnet_usage", "id", (object) ["id"=>$subnet->id, "result" => $subnet_usage]);
+ 		return $subnet_usage;
+ 	}
+ 
+@@ -3034,7 +3034,7 @@
+ 		if(is_null($subnet->permissions) || $subnet->permissions=="null")	return 0;
+ 
+ 		# Check cached result
+-		$cached_item = $this->cache_check('subnet_permissions', "p=$subnet->permissions s=$subnet->sectionId");
++		$cached_item = $this->cache_check('subnet_permissions', "id", "p=$subnet->permissions s=$subnet->sectionId");
+ 		if(is_object($cached_item)) return $cached_item->result;
+ 
+ 		$subnetP = db_json_decode(@$subnet->permissions, true);
+@@ -3081,7 +3081,7 @@
+ 		}
+ 
+ 		# return result
+-		$this->cache_write ('subnet_permissions', (object) ["id"=>"p=$subnet->permissions s=$subnet->sectionId", "result" => $out]);
++		$this->cache_write ('subnet_permissions', "id", (object) ["id"=>"p=$subnet->permissions s=$subnet->sectionId", "result" => $out]);
+ 		return $out;
+ 	}
+ 
+diff -Naur a/functions/classes/class.Tools.php b/functions/classes/class.Tools.php
+--- a/functions/classes/class.Tools.php	2026-04-28 03:33:13.000000000 +1000
++++ b/functions/classes/class.Tools.php	2026-08-17 05:53:21.000000000 +1000
+@@ -2062,6 +2062,10 @@
+                 foreach ($objects as $ot=>$ids) {
+                     if (sizeof($ids)>0) {
+                         foreach ($ids as $id) {
++                            // Check table names - MySQL on Windows is case-insensitive
++                            if (!in_array(strtolower($ot), ['subnets', 'ipaddresses'])) {
++                                continue;
++                            }
+                             // fetch
+                             $item = $this->fetch_object($ot, "id", $id);
+                             if($item!==false) {
+diff -Naur a/functions/classes/class.User.php b/functions/classes/class.User.php
+--- a/functions/classes/class.User.php	2026-04-28 03:33:13.000000000 +1000
++++ b/functions/classes/class.User.php	2026-08-17 05:53:21.000000000 +1000
+@@ -1932,7 +1932,7 @@
+      */
+     public function get_user_permissions_from_json ($json) {
+         // Check cache
+-        $cached_item = $this->cache_check('get_user_permissions_from_json', $json);
++        $cached_item = $this->cache_check('get_user_permissions_from_json', "id", $json);
+         if(is_object($cached_item)) return $cached_item->result;
+ 
+         $groups = array();
+@@ -1949,7 +1949,7 @@
+             $groups[] = $tmp;
+         }
+         // Cache results to avoid repeat database queries.
+-        $this->cache_write('get_user_permissions_from_json', (object) ["id"=>$json, "result" => $groups]);
++        $this->cache_write('get_user_permissions_from_json', "id", (object) ["id"=>$json, "result" => $groups]);
+         return $groups;
+     }
+ 
+@@ -2007,11 +2007,11 @@
+             $valid_sections = $l2domain->permissions;
+         }
+ 
+-        $cached_item = $this->cache_check('l2domain_permissions', $valid_sections);
++        $cached_item = $this->cache_check('l2domain_permissions', "id", $valid_sections);
+         if(is_object($cached_item)) return $cached_item->result;
+ 
+         if (empty($valid_sections)) {
+-            $this->cache_write('l2domain_permissions', (object) ["id"=>$valid_sections, "result" => 0]);
++            $this->cache_write('l2domain_permissions', "id", (object) ["id"=>$valid_sections, "result" => 0]);
+             return 0;
+         }
+ 
+@@ -2043,7 +2043,7 @@
+         }
+ 
+         # return result
+-        $this->cache_write('l2domain_permissions', (object) ["id"=>$valid_sections, "result" => $max_permission]);
++        $this->cache_write('l2domain_permissions', "id", (object) ["id"=>$valid_sections, "result" => $max_permission]);
+         return $max_permission;
+     }
+ 
+diff -Naur a/functions/upgrade_queries/upgrade_queries_1.8.php b/functions/upgrade_queries/upgrade_queries_1.8.php
+--- a/functions/upgrade_queries/upgrade_queries_1.8.php	2026-04-28 03:33:13.000000000 +1000
++++ b/functions/upgrade_queries/upgrade_queries_1.8.php	2026-08-17 05:53:21.000000000 +1000
+@@ -39,3 +39,7 @@
+ $upgrade_queries["1.81.46"]   = [];
+ $upgrade_queries["1.81.46"][] = "-- Version update";
+ $upgrade_queries["1.81.46"][] = "UPDATE `settings` set `version` = '1.81';";
++
++$upgrade_queries["1.82.46"]   = [];
++$upgrade_queries["1.82.46"][] = "-- Version update";
++$upgrade_queries["1.82.46"][] = "UPDATE `settings` set `version` = '1.82';";
+diff -Naur a/functions/version.php b/functions/version.php
+--- a/functions/version.php	2026-04-28 03:33:14.000000000 +1000
++++ b/functions/version.php	2026-08-17 05:53:22.000000000 +1000
+@@ -1,10 +1,10 @@
+ <?php
+ /* set latest version */
+-define("VERSION", "1.81");									//decimal release version e.g 1.32
++define("VERSION", "1.82");									//decimal release version e.g 1.32
+ /* set latest version */
+-define("VERSION_VISIBLE", "1.8.1");							//visible version in footer e.g 1.3.2
++define("VERSION_VISIBLE", "1.8.2");							//visible version in footer e.g 1.3.2
+ /* set latest revision */
+-define("REVISION", "001");									//increment on static content changes (js/css) or point releases to avoid caching issues
++define("REVISION", "007");									//increment on static content changes (js/css) or point releases to avoid caching issues
+ /* set last possible upgrade */
+ define("LAST_POSSIBLE", "1.4");							    //minimum required version to be able to upgrade
+ /* set published - hide dbversion in footer */
+@@ -24,4 +24,4 @@
+ define("SCRIPT_PREFIX", VERSION_VISIBLE.'_r'.REVISION.'_v'.DBVERSION);		//css and js folder prefix to prevent caching issues
+ 
+ 
+-define('GITVERSION', '137141d8');
++define('GITVERSION', '6e11367e');
+diff -Naur a/js/magic.js b/js/magic.js
+--- a/js/magic.js	2026-04-28 03:33:13.000000000 +1000
++++ b/js/magic.js	2026-08-17 05:53:21.000000000 +1000
+@@ -2482,7 +2482,7 @@
+ //remove temp
+ $(document).on("click", ".removeSharedTemp", function() {
+     showPopup("popup_w400");
+-    submit_popup_data ("#popupOverlay .popup_w400", "app/tools/temp-shares/delete-result.php", {code:$(this).attr('data-code')});
++    submit_popup_data ("#popupOverlay .popup_w400", "app/tools/temp-shares/delete-result.php", {code:$(this).attr('data-code'),csrf_cookie:$(this).attr('data-csrf')});
+     hideSpinner();
+ });
+ 
+@@ -2555,7 +2555,8 @@
+     var current  = $(this).attr('data-fieldname');
+     var next     = $(this).attr('data-nextfieldname');
+     var table    = $(this).attr('data-table');
+-    $.post('app/admin/custom-fields/order.php', {current:current, next:next, table:table}, function(data) {
++    var csrf     = $(this).attr('data-csrf');
++    $.post('app/admin/custom-fields/order.php', {current:current, next:next, table:table, csrf_cookie:csrf}, function(data) {
+         $('div.'+table+'-order-result').html(data).slideDown('fast');
+         //reload after 2 seconds if succeeded!
+         reload_window (data);
+diff -Naur a/misc/CHANGELOG b/misc/CHANGELOG
+--- a/misc/CHANGELOG	2026-04-28 03:33:13.000000000 +1000
++++ b/misc/CHANGELOG	2026-08-17 05:53:21.000000000 +1000
+@@ -1,3 +1,24 @@
++== 1.8.2
++
++    Bugfixes:
++    ----------------------------
++    + Rack dropdown fails to populate while editing a device (#4602);
++
++    Security Fixes:
++    ----------------------------
++    + API authentication bypass via object cache key collision;
++    + Disabled API endpoints still accessible;
++    + API read only permission bypass;
++    + API controller arbitrary local file inclusion;
++    + Temporary shares can enumerate all addresses;
++    + Temporary share creation, missing permission checks;
++    + Temporary share creation, missing CSRF checks;
++    + Second-Order SQL injection in custom field reordering;
++    + Second-Order SQL injection in NAT fields;
++    + Custom field reordering, missing CSRF checks;
++    + Subnet permissions can be rewritten by any authenticated user;
++    + Cross subnet and ping insecure direct object references;
++
+ == 1.8.1
+ 
+     Bugfixes:

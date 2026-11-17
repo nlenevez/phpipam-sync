@@ -1,0 +1,50 @@
+# phpipam-sync configuration (source / 1:1 replica).
+#
+# Copy to config.yml. No secrets here: tokens come from token_env or
+# token_command. The exporter reads only `source:`, the importer only
+# `target:`, so one file serves both hosts and each holds one token.
+
+# -- Source: read-only, never written to --------------------------------
+source:
+  base_url: https://ipam1.example.com     # no trailing slash, no /api/
+  app_id: sync                            # phpIPAM Administration > API app id
+  token_env: PHPIPAM_SRC_TOKEN            # env var holding that app's token
+  verify_ssl: true
+  timeout: 30
+
+# -- Target: the replica, written additively ----------------------------
+target:
+  base_url: https://ipam2.example.com
+  app_id: sync
+  # token_env, or token_command (its stdout is the token), e.g.:
+  #   token_command: "ansible-vault view /etc/ipam-sync/target_token"
+  #   token_command: "pass show ipam/instance2-api"
+  token_env: PHPIPAM_DST_TOKEN
+  verify_ssl: true
+  timeout: 30
+
+# -- Sections to replicate (whole sections, nested subnets included) ----
+sections:
+  - Shared
+# Or `sections: all`: every section the API app can see.
+
+# Optional source name -> target name; omit if the names match.
+# section_map:
+#   Shared: Shared-from-instance-1
+
+options:
+  # Replicate ipTags ids. Safe for stock tags 1-4; false if either side
+  # has custom tags.
+  sync_tags: true
+
+  # Create sections missing on the target. Default false: such a section
+  # has no permissions and is invisible to non-admins.
+  create_missing_sections: false
+
+  # Delete target records absent from the snapshot (strict mirror).
+  # Default false (additive). --delete / --no-delete override per run.
+  delete_drift: false
+
+  # Refuse a run deleting more than this fraction of in-scope records
+  # (floor 5). --force-delete bypasses for one run. Default 0.1.
+  delete_limit_fraction: 0.1
