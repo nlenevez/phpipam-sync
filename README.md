@@ -58,13 +58,15 @@ Other documents:
 
 ## Status
 
-Targets **phpIPAM 1.8.1** only. Tested end to end against real 1.8.1
-instances with independent databases and diverged id counters.
+Targets **phpIPAM 1.8.1 and 1.9.1**. Tested end to end against real
+instances of both, with independent databases and diverged id counters;
+all lab checks pass on each, and 1.9.1 returns no subnet or address
+fields the tool does not handle.
 
 `lab/` builds three throwaway instances in Docker:
 
 ```bash
-cd lab && ./setup.sh
+cd lab && ./setup.sh          # or: PHPIPAM_VERSION=v1.9.1 ./setup.sh
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
 ./verify.sh           # 1:1 replication        -- 82 assertions

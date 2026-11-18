@@ -13,7 +13,7 @@ for the replica with a single source.
                                                                              to users)
 ```
 
-Targets phpIPAM **1.8.1** only; for anything else see
+Targets phpIPAM **1.8.1** and **1.9.1**; for anything else see
 [Before you start](#before-you-start).
 
 **Contents**
@@ -50,11 +50,11 @@ Targets phpIPAM **1.8.1** only; for anything else see
 **Enable the API** on every instance: Administration → phpIPAM settings →
 API = On. Otherwise every call returns `503 "API server disabled"`.
 
-**Running a version other than 1.8.1?** Run the lab against it first:
+**Running a version other than 1.8.1 or 1.9.1?** Run the lab against it first:
 
 ```bash
 cd lab
-PHPIPAM_VERSION=v1.8.1 ./setup.sh     # the version this targets
+PHPIPAM_VERSION=<your tag> ./setup.sh  # e.g. v1.9.1
 export PHPIPAM_SRC_TOKEN=SRCTOKEN0000000000000000000000
 export PHPIPAM_DST_TOKEN=DSTTOKEN0000000000000000000000
 ./verify.sh && ./verify-fanin.sh
